@@ -341,26 +341,169 @@ into the same category. Because it had lost its ability to distinguish the two
 cases, the warning was deleted. Workers still retain evidence text and page
 locators for manual inspection; a noisy alarm is not treated as provenance.
 
+## Adding a post-hoc external evidence audit
+
+The paper-only ReMe judgment left several questions that the paper could not
+answer by itself: whether the reported benchmark split followed an official
+protocol, whether the metric implementation matched the labels in Table 1, and
+whether public reproduction reports changed confidence in the result. Phase 6
+therefore added a separate, post-hoc external audit. It reads a completed
+paper-only judgment but does not alter it or feed web evidence back into the
+paper-reading trace.
+
+The first completed backend used Terra to plan up to three consequential
+questions, Tavily to retrieve bounded source records, and Terra again to judge
+the evidence. On ReMe it completed in 97.5 seconds with 22,966 model tokens.
+Three searches returned twelve source records. Most were duplicates or
+secondary material, but the useful records included the official BFCL-V3
+description and an issue in the official ReMe repository.
+
+The BFCL source confirmed that Base Multi-Turn contains 200 tasks and uses
+state- and response-based checks. It did not establish that ReMe's random
+50/150 acquisition/evaluation split was an official benchmark protocol, or
+define ReMe's Avg@4 and Pass@4 aggregation. The repository issue reported much
+lower results under a modified setup and alleged that the released
+`calculate_best_at_k()` behavior did not match the Avg@k label. Because the
+reporter changed the metric code and used different auxiliary configuration,
+the audit treated this as a reproduction-risk signal rather than a
+contradiction. Its formal assessment delta remained `unchanged`.
+
+Manual follow-up found a second repository issue reporting unstable BFCL and
+AppWorld results across repeated runs, including cases where fixed memory did
+not beat no memory. Neither issue contained a visible maintainer explanation or
+constituted an independent controlled reproduction. Together, however, they
+narrow confidence in metric semantics, stability, and reproducibility more
+than the automatic `unchanged` label conveyed. They do not overturn the
+reported aggregate gains or independently test the proposed mechanism.
+
+A second backend tested Grok 4.5 with OpenRouter's native web-search tool. It
+completed one integrated call in 52.4 seconds and used 9,102 tokens. Its
+structured output reported three searches and reached the same overall
+`unchanged` direction while preserving the central order, pool-isolation,
+auxiliary-model, and cost gaps. The provider returned no search telemetry or
+URL annotations, so the output was retained as `unverified` rather than
+discarded. Its token volume, concrete queries, and URLs were consistent with a
+search-assisted response, but the run missed the official ReMe reproduction
+issue and incorrectly reported that no official implementation had been
+found.
+
+This was a useful end-to-end comparison, not a controlled search-backend
+comparison. Terra planned and judged the Tavily branch, while Grok planned,
+searched, selected evidence, and judged in one call. The quality difference
+could therefore come from query planning, retrieval, evidence selection, or
+final reasoning.
+
+A controlled follow-up froze the three Terra-planned queries from the Tavily
+run. Grok received only the paper label and those exact queries; it did not see
+the paper-only judgment or the Tavily result and was not allowed to assess the
+paper. Its normalized source registry was then sent to the same Terra Auditor
+and output contract used by the Tavily branch. No new Planner call was made.
+
+Under this control, Grok retrieval was substantially stronger on ReMe. It
+returned thirteen unique URLs, including the official paper branch, BFCL and
+AppWorld quickstarts, the default validation/retrieval configuration, official
+BFCL material, and three ReMe issue reports. The sources exposed the random
+50/150 workflow, repeated-task settings, a validation threshold of 0.5,
+top-k=5, optional reranking and rewriting, the alleged `best@k` versus Avg@k
+discrepancy, and two additional reports of baseline mismatch or run-to-run
+instability. The earlier Tavily branch had found the benchmark description and
+one issue, but returned more duplicate paper pages and secondary sources.
+
+Terra used the richer registry to corroborate that the system is operational
+and to narrow several previously unspecified implementation details. It still
+left the consequential claims unresolved: evaluation-stream order, memory-pool
+reset and isolation, exact Table 1 aggregation, auxiliary-model reliability,
+rewrite fidelity, and matched end-to-end efficiency. The three issue reports
+remained converging reproduction-risk signals rather than independent
+contradictions. The overall assessment delta stayed `unchanged`, although the
+revised assessment now contained both stronger implementation corroboration
+and narrower confidence in metric stability and reproducibility.
+
+The improvement was not free. Grok retrieval plus Terra used 39,786 model
+tokens and 131.0 seconds, compared with 22,966 recorded model tokens and 97.5
+seconds for the complete Tavily/Terra run. Grok returned 28 URL annotations;
+one unmatched annotation left the result `partially_verified` without blocking
+the audit. The run therefore changed the architectural conclusion: Grok's weak
+integrated result was primarily a role-composition failure, not evidence that
+its search was weak. Terra planning, Grok retrieval, and Terra auditing became
+the supported external-audit path. The experimental backend selector was
+removed from the public CLI; one command now performs all three stages without
+depending on a previous comparison run for its queries.
+
+Formalizing that path exposed a second failure mode. The first implementation
+asked one Grok call to execute three fixed searches and also satisfy a strict
+JSON schema. Two formal canaries returned legal JSON with three empty source
+arrays, even with `tool_choice=required`. A minimal diagnostic request using the
+same model and native OpenRouter tool succeeded when it contained one query and
+no response schema. The supported path was therefore changed to one independent
+Grok request per planned query. Each request returns a normal cited answer;
+the runtime uses URL annotations as provenance and records OpenRouter router
+metadata showing whether the native `server_tools` stage actually ran.
+
+The first split-query canary verified all three tool invocations and returned
+thirteen URL citations without retries. It nevertheless produced no useful
+audit delta because xAI's URL annotations contained no page excerpts and the
+runtime had discarded Grok's cited answer text. Terra received thirteen empty
+source records and correctly left every external question unresolved. This was
+an information-transfer failure rather than a retrieval failure.
+
+The next canary retained each cited answer as a bounded, model-generated
+retrieval summary linked to its citation IDs. The Auditor prompt explicitly
+forbids treating those summaries as verbatim primary-source text. This run again
+completed three independent searches with thirteen sources, no retries, and
+router metadata confirming native web search for every query. It used 372,058
+model tokens and about four and a half minutes of observed wall time, so the
+stability improvement was expensive.
+
+The final assessment delta changed from `unchanged` to `weakened`. The most
+important external finding concerned metric semantics: the official BFCL
+quickstart describes `run_exp_statistic.py` as calculating `best@k&pass@k`,
+while the paper and README report Avg@k. The retrieved implementation summary
+described Avg@4 as grouping repeated scores, taking the maximum in each group,
+and averaging those maxima. Issue #123 independently identified the same
+best@k-versus-Avg@k naming discrepancy before reporting lower results under a
+modified metric. Manual source checking confirmed that the official quickstart
+calls the statistic best@k and that the issue explicitly describes group-max
+then average. This weakens a typical-attempt interpretation of Avg@4, but does
+not erase within-protocol differences in Table 1.
+
+The stronger external result did not resolve the central mechanism question.
+Neither the official quickstart nor benchmark material established the exact
+dynamic task order, cross-task memory visibility, or per-run pool reset used in
+Table 1. Repository issues remain reproduction-risk signals rather than
+controlled contradictions. The formal path is therefore useful for finding
+consequential implementation and metric evidence, but it is not a substitute
+for repository inspection or experiment reproduction.
+
+The three Grok searches were independent but initially ran sequentially. They
+were subsequently changed to run concurrently with a fixed maximum of three
+threads while preserving question order in the audit payload. On the final
+sequential canary's recorded latencies, this reduces the retrieval critical
+path from about 178 seconds to about 77 seconds; Planner and Auditor remain
+sequential dependencies. The change saves wall time but not tokens or search
+cost, and was verified with an offline synchronization test rather than another
+paid ReMe run.
+
 ## What remains outside the current system
 
-The supported CLI now runs one create-once, paper-only audit. It does not search
-the web, inspect an implementation repository, or execute a paper's experiments.
-Those boundaries are deliberate.
+The supported CLI keeps paper reading and external evidence as separate,
+create-once operations. The default audit remains paper-only. An optional
+external-audit command can inspect a completed judgment with bounded web
+queries, recorded source provenance, and an explicit assessment delta. Web
+evidence is never smuggled into the original trace.
 
-A manual external-evidence pilot showed where a later audit stage could matter.
-For HarnessBank, external checking strengthened the concern about evolver-model
-comparability and showed that much of the seven-domain evidence came from an
-author-associated benchmark suite. For ReMe, citation scope and evaluation
-chronology changed how strongly “lifelong evolution” could be interpreted.
-These findings should not be smuggled into a paper-only prompt. A future
-external stage would need explicit triggers, source provenance, and a recorded
-statement of how each source changed the judgment.
+The system still does not execute a paper's experiments or perform broad
+repository analysis. An external audit can locate an official implementation,
+benchmark rule, or issue report, but a code-level claim remains unresolved
+unless the relevant implementation is inspected directly. This preserves a
+clear boundary between literature audit, implementation audit, and actual
+reproduction.
 
-The current system also does not independently prove a paper's mechanism. It
-audits whether the paper's own method, appendices, ablations, and experiments
-support the stated interpretation. Missing code, unreported chronology, or an
-unmatched control remains unresolved rather than being converted into a
-negative fact.
+The system also does not independently prove a paper's mechanism. It audits
+whether the paper's own method, appendices, ablations, experiments, and bounded
+external evidence support the stated interpretation. Missing code, unreported
+chronology, or an unmatched control remains unresolved rather than being
+converted into a negative fact.
 
 ## Condensed timeline
 
@@ -376,6 +519,9 @@ negative fact.
 | Aug 28 | ReMe overview-first profile | More first-round text showed no clear advantage; subtraction mattered more than injection. |
 | Aug 28–29 | HarnessBank transfer and replay | The loop transferred, while Synthesis missed a model-role confound already present in the history. |
 | Aug 29 | Public runner and repository cleanup | Historical runners were replaced by one `audit PAPER --output DIR` interface. |
+| Aug 31 | ReMe external-audit A/B | The first end-to-end comparison favored Tavily/Terra, but mixed planning, retrieval, and judgment differences. |
+| Aug 31 | Controlled ReMe retrieval comparison | With fixed queries and the same Terra Auditor, Grok found richer primary evidence at higher token and latency cost. |
+| Sep 1 | Formal Grok/Terra hardening | Per-query non-schema searches restored citations; preserving cited retrieval summaries exposed best@k semantics behind the reported Avg@4 label. |
 
 The project ended this phase with a smaller public surface and a more explicit
 division of responsibility. Master plans and stops, Locator navigates, Evidence

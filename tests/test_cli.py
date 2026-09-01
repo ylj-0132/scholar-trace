@@ -7,14 +7,14 @@ import pytest
 from deep_research import cli
 
 
-def test_help_exposes_only_audit_command(capsys: pytest.CaptureFixture[str]) -> None:
+def test_help_exposes_only_supported_commands(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["--help"])
 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
     assert output.startswith("usage: scholar-trace ")
-    assert "{audit}" in output
+    assert "{audit,external-audit}" in output
     assert "Search papers" not in output
     assert "Initialize the local SQLite database" not in output
 
@@ -76,6 +76,34 @@ def test_audit_passes_arguments_to_run_audit(
         "output_dir": output,
         "config": cli.AuditConfig(worker_parallelism=4),
     }
+
+
+def test_external_audit_passes_paths_to_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(source_result: Path, output_dir: Path) -> int:
+        captured.update(source_result=source_result, output_dir=output_dir)
+        return 0
+
+    monkeypatch.setattr(cli, "run_external_audit", fake_run)
+    source = tmp_path / "result.json"
+    output = tmp_path / "external"
+
+    assert cli.main(["external-audit", str(source), "--output", str(output)]) == 0
+    assert captured == {
+        "source_result": source,
+        "output_dir": output,
+    }
+
+
+def test_external_audit_rejects_experimental_backend_flags() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main([
+            "external-audit", "result.json", "--output", "external", "--backend", "grok-native",
+        ])
+    assert exc_info.value.code == 2
 
 
 @pytest.mark.parametrize("worker_parallelism", (0, 5))

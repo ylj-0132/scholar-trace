@@ -99,7 +99,7 @@ def test_run_audit_fake_execution_writes_safe_create_once_outputs(
 
     monkeypatch.setattr(experiment, "LLMClient", _FakeClient)
     monkeypatch.setattr(experiment, "run_local_paper_agent", fake_run_local_paper_agent)
-    monkeypatch.setattr(experiment, "llm_api_key_for_model", lambda _model: "secret-key")
+    monkeypatch.setattr(experiment, "llm_api_key", lambda: "secret-key")
     output_dir = tmp_path / "audit-output"
 
     assert experiment.run_audit(_pdf(tmp_path / "paper.pdf"), output_dir) == 0

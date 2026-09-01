@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import llm_api_base, llm_api_key_for_model, llm_request_timeout
+from .config import llm_api_base, llm_api_key, llm_request_timeout
 from .llm import LLMClient
 from .paper_agent_runtime import run_local_paper_agent
 
@@ -128,7 +128,7 @@ def _role_clients(client: object | None) -> tuple[dict[str, object], tuple[str, 
     clients: dict[str, object] = {}
     keys: list[str] = []
     for role, model in ROLE_MODELS.items():
-        api_key = llm_api_key_for_model(model)
+        api_key = llm_api_key()
         if api_key:
             keys.append(api_key)
         clients[role] = LLMClient(

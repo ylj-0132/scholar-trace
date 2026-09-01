@@ -2,7 +2,8 @@
 
 ScholarTrace audits a local research paper as evidence for an implementable
 mechanism. It is a paper-reading research prototype: it does not search the
-web, rank papers for personal use, or replace peer review.
+web during its internal audit, rank papers for personal use, or replace peer
+review.
 
 ## What it does
 
@@ -27,8 +28,9 @@ python -m pip install -e ".[dev]"
 ```
 
 Set `OPENAI_API_KEY` in a local `.env` file or in the environment before a real
-audit. The sample variable names are in [.env.example](.env.example); do not
-commit credentials.
+audit. Set `OPENAI_API_BASE` as well when using an OpenAI-compatible gateway.
+The optional external audit also needs `OPENROUTER_API_KEY`. The sample variable
+names are in [.env.example](.env.example); do not commit credentials.
 
 ## Run one audit
 
@@ -46,14 +48,53 @@ An audit writes:
 - `progress.json` — current terminal-safe progress status;
 - `result.json` — final trace or a safe failure record.
 
+## Run an external evidence audit
+
+After a completed paper-only audit, an optional separate command can check
+bounded external evidence without modifying the original result:
+
+```bash
+scholar-trace external-audit data/audits/paper/result.json --output data/audits/paper-external
+```
+
+This command uses Terra to select at most three consequential questions, sends
+the queries concurrently as separate Grok 4.5 native web-search requests
+through OpenRouter, and uses Terra to judge how the cited evidence changes the
+paper-only assessment. Grok's cited answers are retained as model-generated
+retrieval summaries, not represented as verbatim source text. The command
+writes a separate create-once manifest, progress record, and result; the
+paper-only source result is never modified.
+
+## Repository layout
+
+- `paper_agent.py` contains the deterministic adaptive loop and trace types.
+- `paper_agent_runtime.py` contains role prompts, context construction, and LLM
+  adapters.
+- `experiment.py` is the supported local-PDF runner.
+- `external_audit.py` is the optional post-hoc Planner → Grok → Auditor path.
+- `tests/` uses fake clients and transports; it does not spend model or search
+  credits.
+- [CASE_STUDY.md](docs/CASE_STUDY.md) records why the current boundaries were
+  chosen and what the canaries actually showed.
+
+Run the offline suite with:
+
+```bash
+pytest -q
+```
+
 ## Cost and limitations
 
-This command makes paid model calls and can take many minutes for a long PDF.
-Run it only with a deliberate output directory and budget. The result is an
-auditable model-produced analysis, not an independent replication, a claim of
-paper quality, or proof of causal mechanism. It is limited to extractable local
-PDF content; missing reporting remains unresolved rather than being filled by
-external search.
+Both commands make paid model calls. A long PDF audit can take many minutes,
+and native search can return large model contexts. Run them only with a
+deliberate output directory and budget. The result is an auditable
+model-produced analysis, not an independent replication, a claim of paper
+quality, or proof of causal mechanism.
+
+The internal audit is limited to extractable local PDF content. The post-hoc
+branch can check cited web evidence, but it does not execute experiments or
+perform a full repository review. Missing evidence remains unresolved rather
+than being converted into a negative fact.
 
 Historical paper PDFs and raw experiment outputs remain in the local development
 workspace but are excluded from the public repository. The
