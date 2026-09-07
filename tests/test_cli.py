@@ -98,6 +98,30 @@ def test_external_audit_passes_paths_to_runner(
     }
 
 
+@pytest.mark.parametrize("mode", ["full-history", "rubric-union"])
+def test_audit_reflection_context_reaches_runner(monkeypatch, mode: str) -> None:
+    received = []
+    def run(paper, output, *, config):
+        received.append(config.reflection_context_mode)
+        return 0
+    monkeypatch.setattr(cli, "run_audit", run)
+    assert cli.main(["audit", "paper.pdf", "--output", "out", "--reflection-context", mode]) == 0
+    assert received == [mode]
+
+
+@pytest.mark.parametrize("mode", ["rubric-focused", "rubric-routing"])
+def test_audit_rejects_retired_context_names_before_running(monkeypatch, mode):
+    monkeypatch.setattr(cli, "run_audit", lambda *a, **kw: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["audit", "paper.pdf", "--output", "out", "--reflection-context", mode])
+    assert exc.value.code == 2
+
+
+def test_audit_default_context_is_rubric_union():
+    args = cli.build_parser().parse_args(["audit", "paper.pdf", "--output", "out"])
+    assert args.reflection_context == cli.AuditConfig().reflection_context_mode == "rubric-union"
+
+
 def test_external_audit_rejects_experimental_backend_flags() -> None:
     with pytest.raises(SystemExit) as exc_info:
         cli.main([

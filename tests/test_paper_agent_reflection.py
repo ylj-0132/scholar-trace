@@ -66,7 +66,7 @@ def test_post_method_model_reflection_is_visible_to_the_next_master() -> None:
     assert "coupled setting" in trace.reflection_reports[0].reflection_memo
 
 
-def test_pre_decide_reflection_is_skipped_without_a_named_focus() -> None:
+def test_reflection_is_skipped_without_a_named_focus() -> None:
     master_states: list[AgentState] = []
     reflection_calls: list[tuple[str, tuple[str, ...]]] = []
 
@@ -102,17 +102,20 @@ def test_pre_decide_reflection_is_skipped_without_a_named_focus() -> None:
     assert trace.steps[-1].action.kind == "DECIDE"
 
 
-def test_pre_decide_reflection_runs_once_for_a_named_mechanism_conflict() -> None:
+def test_reflection_runs_once_for_a_named_mechanism_conflict() -> None:
     def master(state: AgentState) -> MasterAction:
         if not state.steps:
             return MasterAction("READ_PAPER", (EvidenceTask("first"),))
         if len(state.steps) == 1:
             return MasterAction("READ_PAPER", (EvidenceTask("second"),))
+        if len(state.reflection_reports) == 2:
+            return MasterAction("DECIDE", assessment="final bounded conclusion")
         return MasterAction(
-            "DECIDE",
+            "REFLECT",
             assessment="Enough for a bounded judgment.",
             stop_reason_code="evidence_sufficient",
-            pre_decide_reflection_focus="Whether joint rewriting changes utility credit.",
+            reflection_focus="Whether joint rewriting changes utility credit.",
+            reflection_rubric_ids=("core_contribution",),
         )
 
     trace = run_paper_agent(
@@ -122,17 +125,42 @@ def test_pre_decide_reflection_runs_once_for_a_named_mechanism_conflict() -> Non
             trigger, finding_ids
         ),
         max_reflections=2,
-        max_rounds=3,
+        max_rounds=4,
     )
 
     assert [report.trigger for report in trace.reflection_reports] == [
         "post_method_model",
-        "pre_decide",
+        "master_requested",
     ]
-    assert len(trace.deferred_decisions) == 1
+    assert trace.deferred_decisions == ()
 
 
-def test_pre_decide_reflection_receives_the_deferred_decision() -> None:
+def test_existing_evidence_can_be_reflected_again_for_an_unchecked_relationship() -> None:
+    def master(state: AgentState) -> MasterAction:
+        if not state.steps:
+            return MasterAction("READ_PAPER", (EvidenceTask("first"),))
+        if len(state.reflection_reports) == 2:
+            return MasterAction("DECIDE", assessment="final bounded conclusion")
+        return MasterAction(
+            "REFLECT", assessment="A bounded conclusion.",
+            reflection_focus="Does the inspected scope justify calling this detail unreported?",
+            reflection_rubric_ids=("core_contribution",),
+        )
+
+    trace = run_paper_agent(
+        master=master, worker=_result,
+        reflector=lambda state, trigger, finding_ids, proposed_decision=None: _report(trigger, finding_ids),
+        max_reflections=2, max_rounds=3,
+    )
+
+    assert trace.outcome == "DECIDE"
+    assert [report.trigger for report in trace.reflection_reports] == ["post_method_model", "master_requested"]
+    assert trace.reflection_reports[0].reflected_finding_ids == trace.reflection_reports[1].reflected_finding_ids
+    assert trace.deferred_decisions == ()
+    assert len(trace.steps) == 3  # No fabricated READ_PAPER just to create novelty.
+
+
+def test_reflection_receives_the_deferred_decision() -> None:
     proposed: list[MasterAction | None] = []
 
     def master(state: AgentState) -> MasterAction:
@@ -140,14 +168,17 @@ def test_pre_decide_reflection_receives_the_deferred_decision() -> None:
             return MasterAction("READ_PAPER", (EvidenceTask("first"),))
         if len(state.steps) == 1:
             return MasterAction("READ_PAPER", (EvidenceTask("second"),))
+        if len(state.reflection_reports) == 2:
+            return MasterAction("DECIDE", assessment="final bounded conclusion")
         return MasterAction(
-            "DECIDE",
+            "REFLECT",
             assessment="A proposed conclusion.",
             rationale="Evidence is sufficient.",
             unresolved_questions=("A bounded open question.",),
             checklist_coverage={"core_contribution": "covered"},
             stop_reason_code="evidence_sufficient",
-            pre_decide_reflection_focus="Whether the remaining caveat changes the conclusion.",
+            reflection_focus="Whether the remaining caveat changes the conclusion.",
+            reflection_rubric_ids=("core_contribution",),
         )
 
     def reflector(
@@ -166,7 +197,7 @@ def test_pre_decide_reflection_receives_the_deferred_decision() -> None:
         worker=_result,
         reflector=reflector,
         max_reflections=2,
-        max_rounds=3,
+        max_rounds=4,
     )
 
     assert trace.outcome == "DECIDE"
@@ -242,7 +273,7 @@ def test_reflection_parser_does_not_accept_the_old_hypothesis_card_shape() -> No
         )
 
 
-def test_pre_decide_reflection_can_return_master_to_reading_without_becoming_evidence() -> None:
+def test_reflection_can_return_master_to_reading_without_becoming_evidence() -> None:
     calls = 0
 
     def master(state: AgentState) -> MasterAction:
@@ -252,12 +283,15 @@ def test_pre_decide_reflection_can_return_master_to_reading_without_becoming_evi
             return MasterAction("READ_PAPER", (EvidenceTask("first"),))
         if len(state.steps) == 1:
             return MasterAction("READ_PAPER", (EvidenceTask("second"),))
-        if len(state.reflection_reports) == 2 and len(state.steps) == 2:
+        if len(state.reflection_reports) == 2 and len(state.steps) == 3:
             return MasterAction("READ_PAPER", (EvidenceTask("verification"),))
+        if len(state.reflection_reports) == 2:
+            return MasterAction("DECIDE", assessment="final bounded conclusion")
         return MasterAction(
-            "DECIDE",
+            "REFLECT",
             assessment="final bounded conclusion",
-            pre_decide_reflection_focus="Whether the verification changes the conclusion.",
+            reflection_focus="Whether the verification changes the conclusion.",
+            reflection_rubric_ids=("core_contribution",),
         )
 
     trace = run_paper_agent(
@@ -265,11 +299,11 @@ def test_pre_decide_reflection_can_return_master_to_reading_without_becoming_evi
         worker=_result,
         reflector=lambda state, trigger, finding_ids, proposed_decision=None: _report(trigger, finding_ids),
         max_reflections=2,
-        max_rounds=4,
+        max_rounds=5,
     )
 
     assert trace.outcome == "DECIDE"
-    assert [step.action.tasks[0].question for step in trace.steps[:-1]] == [
+    assert [step.action.tasks[0].question for step in trace.steps[:-1] if step.results] == [
         "first", "second", "verification"
     ]
     assert len(trace.reflection_reports) == 2

@@ -360,7 +360,7 @@ def test_master_prompt_declares_all_action_json_contracts() -> None:
 
     prompt = json.loads(llm.calls[0]["prompt"])
     contract = prompt["output_contract"]
-    assert set(contract) == {"READ_PAPER", "DECIDE", "NEEDS_HUMAN"}
+    assert set(contract) == {"READ_PAPER", "REFLECT", "READ_PAPER_AND_REFLECT", "DECIDE", "NEEDS_HUMAN"}
     assert contract["READ_PAPER"]["kind"] == "READ_PAPER"
     assert contract["READ_PAPER"]["tasks"][0]["question"]
     assert contract["READ_PAPER"]["tasks"][0]["source_scope"] == "paper"
@@ -380,13 +380,12 @@ def test_master_prompt_declares_all_action_json_contracts() -> None:
             "material question that remains open but does not prevent a supported judgment"
         ],
         "assessment": "evidence-grounded assessment of contribution, evidence strength, and boundaries",
-        "rationale": "why the judgment is complete enough to finalize and how remaining questions are bounded",
+        "rationale": "why further reading can stop, whether existing evidence relationships warrant Reflection, and how remaining questions are bounded",
         "checklist_coverage": {
             key: "covered|unresolved|not_applicable"
             for key in runtime.DECISION_CHECKLIST
         },
         "stop_reason_code": "evidence_sufficient|paper_saturated|remaining_gaps_unreported|remaining_gaps_external",
-        "pre_decide_reflection_focus": None,
     }
     assert contract["NEEDS_HUMAN"]["assessment"] is None
     instructions = " ".join(prompt["instructions"])
@@ -396,15 +395,19 @@ def test_master_prompt_declares_all_action_json_contracts() -> None:
     assert "missing paper evidence" in instructions
     assert "expected judgment delta" in instructions
     assert "Budget remaining is not evidence value" in instructions
+    assert "Do not continue because rounds remain; DECIDE once the accumulated evidence supports the paper judgment" in instructions
+    assert "every remaining gap is non-blocking, already paper-unreported, answerable only by code or external evidence, or unlikely to change the assessment" in instructions
     assert "paper-unreported" in instructions
-    assert "do not reopen it" in instructions
+    assert "preserve it as unresolved and do not reopen it through another section, paraphrase, locator query, or Worker task unless new locator evidence identifies a specific unexamined source" in instructions
+    assert "At every turn assess reading value and verification value separately" in instructions
+    assert "reviewing whether the existing evidence justified calling the detail unreported" in instructions
     assert "general completeness check" in instructions
     assert "Every task in a multi-task READ_PAPER action must add a distinct, non-duplicate evidence direction" in instructions
     assert "the paper could resolve it" in instructions
     assert "A stable overall assessment is not sufficient reason to stop" in instructions
     assert "need not change the overall positive or negative assessment" in instructions
     assert "one independent direction not originating in Reflection" in instructions
-    assert "add or correct a material caveat" in instructions
+    assert "materially qualify or correct the conclusion" in instructions
     assert "no distinct evidence-bearing paper-internal direction" in instructions
     assert "supported finding or bounded limitation" in instructions
     assert "At least one plausible answer must materially" not in instructions
@@ -474,9 +477,9 @@ def test_master_prompt_balances_cross_finding_questions_with_discovery() -> None
 
     instructions = " ".join(json.loads(llm.calls[0]["prompt"])["instructions"])
     assert "inspect relationships among prior findings" in instructions
-    assert "bounded Cross-check task" in instructions
-    assert "change, qualify or bound the assessment" in instructions
-    assert "do not let Cross-check automatically replace independent Discovery" in instructions
+    assert "Worker Cross-check means checking a specific missing source passage" in instructions
+    assert "analysis of relationships among already available reports belongs to REFLECT" in instructions
+    assert "Do not let either kind of check automatically replace valuable independent Discovery" in instructions
     assert "near-duplicate search for an absent detail" in instructions
     assert "new locator evidence" in instructions
     assert "task's decision_relevance" in instructions
@@ -2175,7 +2178,7 @@ def _incremental_master_context_state() -> AgentState:
         unresolved_questions=("CURRENT_UNRESOLVED_VERBATIM",),
         reflection_reports=(
             ReflectionReport("post_method_model", ("r1-t1-f1",), "OLD_REFLECTION_MEMO_DO_NOT_SEND"),
-            ReflectionReport("pre_decide", ("r2-t1-f1",), "LATEST_REFLECTION_MEMO_VERBATIM"),
+            ReflectionReport("master_requested", ("r2-t1-f1",), "LATEST_REFLECTION_MEMO_VERBATIM"),
         ),
         steps=(
             TraceStep(1, first_action, (first_result, failed_result)),
@@ -2272,6 +2275,50 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
     assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in json.dumps(full_state)
     assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in json.dumps(full_state)
     assert "OLD_REFLECTION_MEMO_DO_NOT_SEND" in json.dumps(full_state)
+
+
+@pytest.mark.parametrize("suggestions", [
+    (("Check the baseline model", "Check the proposer"), ("Check the metric",),
+     ("Check the budget",), ()),
+    ((), (), ()),
+])
+def test_incremental_master_receives_all_latest_round_worker_suggestions(
+    suggestions: tuple[tuple[str, ...], ...],
+) -> None:
+    old_result = WorkerResult(
+        task=EvidenceTask("Earlier task"),
+        suggested_questions=("Old suggestion already presented to Master",),
+    )
+    results = tuple(
+        WorkerResult(task=EvidenceTask(f"Latest task {index}"), suggested_questions=questions)
+        for index, questions in enumerate(suggestions, start=1)
+    )
+    state = AgentState(
+        findings=(old_result, *results),
+        steps=(
+            TraceStep(1, MasterAction("READ_PAPER", (old_result.task,)), (old_result,)),
+            TraceStep(2, MasterAction("READ_PAPER", tuple(r.task for r in results)), results),
+        ),
+    )
+    llm = FakeLLM([{"kind": "NEEDS_HUMAN", "tasks": [], "assessment": None}])
+    master = runtime.PaperAgentMaster(
+        llm=llm,
+        paper_name="paper.pdf",
+        page_index="[]",
+        overview_text="Overview.",
+        overview_images=(),
+        master_context_mode="incremental-no-raw-evidence",
+    )
+
+    master(state)
+
+    prompt = json.loads(llm.calls[0]["prompt"])
+    assert prompt["state"]["latest_worker_suggested_questions"] == [
+        {"origin_question": f"Latest task {index}", "questions": list(questions)}
+        for index, questions in enumerate(suggestions, start=1)
+        if questions
+    ]
+    assert old_result.suggested_questions[0] in json.dumps(runtime._state_payload(state))
 
 
 def test_incremental_master_context_preserves_the_first_call_and_full_reflector_synthesis_state() -> None:
@@ -2483,7 +2530,7 @@ def test_master_prompt_separates_coverage_from_sufficiency_and_preserves_open_qu
     principles = " ".join(prompt["mechanism_audit_principles"])
     assert "Count an issue as covered when it is mentioned" not in principles
     assert "Checklist coverage records what has been examined; it is not by itself evidence that the paper judgment is complete" in instructions
-    assert "qualify or bound the assessment without reversing it" in instructions
+    assert "a question may be valuable even when it will not reverse the overall judgment" in instructions
     assert "Worker suggested questions and unreviewed paper directions" in instructions
     assert "distinct unreviewed evidence-bearing direction remains" in instructions
     assert "Budget remaining is not evidence value" in instructions
@@ -2604,6 +2651,60 @@ def test_failed_final_synthesis_does_not_leave_a_nonuniform_loop_assessment(
     assert trace.model_calls[-1].validation_error is not None
 
 
+@pytest.mark.parametrize("mode", ["full-history", "rubric-union"])
+def test_adaptive_run_records_focused_reflection_and_final_finding_provenance(
+    tmp_path, monkeypatch, mode: str,
+) -> None:
+    pages = make_pages()
+    monkeypatch.setattr(runtime, "extract_pdf_pages", lambda path: pages)
+    monkeypatch.setattr(runtime, "render_pdf_pages", lambda path, numbers: {n: "data:image/png;base64,x" for n in numbers})
+    read = {
+        "kind": "READ_PAPER", "tasks": [{"question": "Check comparison", "source_scope": "paper"}],
+        "conclusion_at_risk": "Mechanism attribution", "missing_evidence": "Matched budget",
+        "expected_judgment_delta": "Qualify mechanism attribution",
+    }
+    evidence = {"findings": [{
+        "finding": "An observation", "evidence": [{"content": pages[0].text, "evidence_type": "text", "locator": "p. 1"}], "caveat": "Check the role assignment",
+    }]}
+    decide = {"kind": "DECIDE", "assessment": "Bounded conclusion", "stop_reason_code": "evidence_sufficient"}
+    focused_decide = {
+        "kind": "REFLECT", "reflection_focus": "Do model-role differences explain the outcome?",
+        "reflection_rubric_ids": ["evaluation_validity"],
+        "reflection_finding_ids": ["r1-t1-f1", "r2-t1-f1"],
+    }
+    final = {
+        "assessment": "The model roles are a confound.",
+        "key_findings": [{**evidence["findings"][0], "source_finding_ids": ["r1-t1-f1", "r2-t1-f1"]}],
+        "finding_dispositions": [
+            {"finding_id": key, "status": "merged", "reason": "Joint model-role comparison"}
+            for key in ("r1-t1-f1", "r2-t1-f1")
+        ],
+    }
+    llm = FakeLLM([
+        read, {"page_ranges": [{"start": 1, "end": 1}], "rationale": "Method"}, evidence,
+        {"reflection_memo": "Consider a model-role confound."},
+        read, {"page_ranges": [{"start": 1, "end": 1}], "rationale": "Control"}, evidence,
+        focused_decide, {"reflection_memo": "Preserve the unresolved attribution boundary."},
+        decide, final,
+    ])
+    trace = runtime.run_local_paper_agent(
+        pdf_path=tmp_path / "paper.pdf", llm=llm, max_rounds=4, max_reflections=2,
+        master_context_mode="incremental-no-raw-evidence",
+        paper_context_mode="master-overview-history-only", reflection_context_mode=mode,
+    )
+    assert trace.outcome == "DECIDE"
+    assert len(trace.reflection_reports) == 2
+    assert trace.reflection_reports[0].context_mode == "full-history"
+    assert trace.reflection_reports[1].context_mode == mode
+    assert trace.deferred_decisions == ()
+    assert trace.steps[2].action.kind == "REFLECT"
+    assert trace.steps[2].action.reflection_finding_ids == ("r1-t1-f1", "r2-t1-f1")
+    assert trace.final_judgment.provenance_status == "complete"
+    assert trace.final_judgment.key_findings[0].source_finding_ids == ("r1-t1-f1", "r2-t1-f1")
+    assert len(trace.model_calls) == 11
+    assert not llm.responses
+
+
 def test_master_parses_optional_context_selection_fields_strictly() -> None:
     action = runtime.parse_master_action(
         {
@@ -2688,6 +2789,7 @@ def test_selected_context_reaches_locator_and_evidence_without_full_master_state
         "evidence_type": "table",
         "evidence_locator": "Table 1, p. 1",
         "decision_relevance": "Check whether the results conflict.",
+        "task_rubric_ids": [],
     }
     assert locator_prompt["research_context"] == [expected_context]
     assert evidence_prompt["research_context"] == [expected_context]
@@ -2913,6 +3015,7 @@ def test_state_payload_keeps_structured_evidence_and_worker_diagnostics() -> Non
         {
             "finding_id": "r1-t1-f1",
             "question": "Inspect the comparison",
+            "task_rubric_ids": [],
             "finding": "first finding",
             "evidence": "first text",
             "evidence_type": "text",
@@ -2928,6 +3031,7 @@ def test_state_payload_keeps_structured_evidence_and_worker_diagnostics() -> Non
         {
             "finding_id": "r1-t1-f2",
             "question": "Inspect the comparison",
+            "task_rubric_ids": [],
             "finding": "second finding",
             "evidence": "second figure",
             "evidence_type": "figure",
@@ -3009,7 +3113,7 @@ def test_role_mixed_worker_uses_discovery_or_cross_check_prompt_from_task_contex
     assert "independent local evidence analyst" in " ".join(prompts[1]["instructions"])
     assert prompts[2]["research_context"][0]["finding_id"] == "r1-t1-f1"
     assert "cross-finding reviewer" not in " ".join(prompts[2]["instructions"])
-    assert "cross-finding reviewer" in " ".join(prompts[3]["instructions"])
+    assert "source-grounded cross-check analyst" in " ".join(prompts[3]["instructions"])
     assert "do not delete, overwrite, or rewrite historical findings" in " ".join(
         prompts[3]["instructions"]
     )

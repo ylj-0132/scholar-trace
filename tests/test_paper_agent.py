@@ -475,7 +475,7 @@ def test_needs_human_preserves_provisional_assessment() -> None:
     assert trace.assessment == "evidence remains inconclusive"
 
 
-def test_decide_with_tasks_preserves_action_without_running_tasks() -> None:
+def test_decide_with_tasks_is_rejected_without_running_tasks() -> None:
     worker_calls = 0
 
     def worker(task: EvidenceTask) -> WorkerResult:
@@ -490,8 +490,9 @@ def test_decide_with_tasks_preserves_action_without_running_tasks() -> None:
     )
     trace = run_paper_agent(master=lambda state: action, worker=worker, max_rounds=1)
 
-    assert trace.outcome == "DECIDE"
-    assert trace.assessment == "decided assessment"
+    assert trace.outcome == "NEEDS_HUMAN"
+    assert trace.assessment is None
+    assert trace.stop_reason == "exclusive_action_with_reading_tasks"
     assert trace.steps[0].action == action
     assert worker_calls == 0
 

@@ -17,6 +17,7 @@ from deep_research.paper_agent import (
     ResearchContext,
     EvidenceTask,
     FindingEvidence,
+    FindingDisposition,
     FinalJudgment,
     FinalJudgmentFinding,
     ImageInputRef,
@@ -28,6 +29,7 @@ from deep_research.paper_agent import (
     SinglePassTrace,
     WorkerResult,
     WorkerFinding,
+    action_request_error,
     completed_finding_records,
     run_paper_agent,
 )
@@ -63,6 +65,20 @@ MECHANISM_AUDIT_PRINCIPLES = (
     "Treat a smaller-model result as an outcome comparison, not an efficiency result, unless total model calls, tokens, latency, or cost are matched or reported.",
     "Reconcile headline prose and claimed deltas with table values, metric definitions, labels, and simple arithmetic; preserve material inconsistencies even when the overall conclusion is unchanged.",
 )
+REFLECTION_CONTEXT_MODES = {"full-history", "rubric-union"}
+REFLECTION_RUBRIC_GUIDANCE = {
+    "core_contribution": "Distinguish the claimed mechanism, its intended function, and simpler functional substitutes.",
+    "main_evidence": "Check whether the observed evidence distinguishes the intended mechanism from the competing explanation.",
+    "ablation_or_counterevidence": "Check causal isolation: changes in components, access paths, candidate pools, or budgets can confound an ablation. Include counterevidence.",
+    "direct_vs_proxy_metric": "Distinguish the claimed capability from what the measured score actually observes; consider shortcuts and excluded valid answers.",
+    "evaluation_validity": "Check model-role assignments, data splits, chronology, pool isolation, and whether the comparison answers the stated question.",
+    "cost_stability_robustness": "Check whether variability, boundary effects, sustained updates, storage growth, or workload-dependent cost changes the interpretation.",
+    "claim_boundary": "Separate a supported outcome from causal attribution or generalization beyond the supplied evidence.",
+    "auxiliary_model_reliability": "Check validator or judge reliability, model dependence, role ownership, calibration, and self-confirmation risk.",
+    "generative_transformation_fidelity": "Check whether rewrite, summarization, or compression loses conditions, adds unsupported information, or changes downstream meaning.",
+    "matched_resource_efficiency": "Compare total calls, tokens, latency, candidate/context sizes, and auxiliary-model resources before attributing efficiency to a mechanism.",
+    "claim_result_consistency": "Reconcile the consequential claim with metric definitions, table labels, configuration, and arithmetic.",
+}
 DEFAULT_IMAGE_DPI = 144
 CAPTION_RE = re.compile(r"^(?:figure|fig\.?|table)\s+\d+\b", re.IGNORECASE)
 
@@ -115,6 +131,7 @@ MASTER_OUTPUT_CONTRACT = {
                 "question": "one bounded evidence question",
                 "source_scope": "paper",
                 "related_finding_ids": [],
+                "rubric_ids": [],
                 "decision_relevance": "this task's unverified purpose and conclusion at risk, competing explanation or boundary, and expected judgment delta",
             }
         ],
@@ -138,11 +155,10 @@ MASTER_OUTPUT_CONTRACT = {
             "evidence-grounded assessment of contribution, evidence strength, and boundaries"
         ),
         "rationale": (
-            "why the judgment is complete enough to finalize and how remaining questions are bounded"
+            "why further reading can stop, whether existing evidence relationships warrant Reflection, and how remaining questions are bounded"
         ),
         "checklist_coverage": {key: "covered|unresolved|not_applicable" for key in DECISION_CHECKLIST},
         "stop_reason_code": "evidence_sufficient|paper_saturated|remaining_gaps_unreported|remaining_gaps_external",
-        "pre_decide_reflection_focus": None,
     },
     "NEEDS_HUMAN": {
         "kind": "NEEDS_HUMAN",
@@ -152,6 +168,26 @@ MASTER_OUTPUT_CONTRACT = {
         "rationale": "why the Agent cannot safely decide",
         "checklist_coverage": {key: "covered|unresolved|not_applicable" for key in DECISION_CHECKLIST},
     },
+}
+
+MASTER_OUTPUT_CONTRACT["REFLECT"] = {
+    "kind": "REFLECT",
+    "tasks": [],
+    "reflection_focus": "the consequential proposed conclusion, unchecked evidence relationship and possible judgment impact",
+    "reflection_rubric_ids": ["core_contribution"],
+    "reflection_finding_ids": [],
+    "assessment": "current provisional assessment, not a final decision",
+    "rationale": "why reasoning over existing evidence is valuable without reading new pages",
+    "unresolved_questions": [],
+    "checklist_coverage": {key: "covered|unresolved|not_applicable" for key in DECISION_CHECKLIST},
+}
+MASTER_OUTPUT_CONTRACT["READ_PAPER_AND_REFLECT"] = {
+    **MASTER_OUTPUT_CONTRACT["READ_PAPER"],
+    **MASTER_OUTPUT_CONTRACT["REFLECT"],
+    "kind": "READ_PAPER_AND_REFLECT",
+    "tasks": MASTER_OUTPUT_CONTRACT["READ_PAPER"]["tasks"],
+    "rationale": "why both reading and reflection independently add value now",
+    "independence_rationale": "why Reflection can use prior findings without this batch's new evidence, and Workers need no result from this Reflection",
 }
 
 STOP_REASON_CODES = {
@@ -446,6 +482,8 @@ class PaperEvidenceWorker:
     def __call__(self, task: EvidenceTask) -> WorkerResult:
         if task.source_scope != "paper":
             return WorkerResult(task=task, error="unsupported_source_scope:paper_only")
+        if not isinstance(task.rubric_ids, tuple) or not _valid_task_rubric_ids(task.rubric_ids):
+            return WorkerResult(task=task, error="invalid_task_rubric_ids")
 
         role_instructions = _worker_role_instructions(task, self.worker_role_mode)
         locator_prompt = _build_locator_prompt(
@@ -454,6 +492,7 @@ class PaperEvidenceWorker:
             page_index=self.page_index,
             page_count=len(self.pages),
             research_context=self._research_context,
+            rubric_ids=task.rubric_ids,
         )
         try:
             locator_payload, locator_call_id = _invoke_model(
@@ -536,6 +575,7 @@ class PaperEvidenceWorker:
             ),
             research_context=self._research_context,
             role_instructions=role_instructions,
+            rubric_ids=task.rubric_ids,
         )
         try:
             evidence_payload, evidence_call_id = _invoke_model(
@@ -589,6 +629,7 @@ class PaperAgentMaster:
         recorder: ModelCallRecorder | None = None,
         worker_role_mode: str = "legacy",
         reflection_enabled: bool = False,
+        max_reflections: int = 2,
         investigation_target: str | None = None,
         master_context_mode: str = "full-history",
         paper_context_mode: str = "legacy",
@@ -611,6 +652,7 @@ class PaperAgentMaster:
         self.recorder = recorder
         self.worker_role_mode = worker_role_mode
         self.reflection_enabled = reflection_enabled
+        self.max_reflections = max_reflections if reflection_enabled else 0
         self.investigation_target = investigation_target
         self.master_context_mode = master_context_mode
         self.paper_context_mode = paper_context_mode
@@ -652,6 +694,13 @@ class PaperAgentMaster:
                 "decision_checklist": DECISION_CHECKLIST,
                 "mechanism_audit_principles": MECHANISM_AUDIT_PRINCIPLES,
                 "output_contract": MASTER_OUTPUT_CONTRACT,
+                "reflection_budget": {
+                    "remaining": max(0, self.max_reflections - len(state.reflection_reports)),
+                    "request_available": bool(
+                        state.reflection_reports and completed_finding_records(state)
+                        and len(state.reflection_reports) < self.max_reflections
+                    ),
+                },
                 "image_inputs": _image_input_payload(self.overview_image_inputs),
                 "instructions": [
                     "Choose concrete paper-internal evidence questions necessary for a complete, evidence-supported paper judgment, not merely enough evidence to choose an overall positive or negative direction.",
@@ -661,12 +710,13 @@ class PaperAgentMaster:
                     "When main_paper_text is supplied, identify one or two load-bearing headline claims whose validity can be checked inside the paper. If a claim depends on arithmetic, metric labels, model or configuration matching, or a table or figure comparison, convert it into a bounded Worker verification task; do not treat seeing it in main_paper_text as verified downstream evidence.",
                     "Select only headline claims that materially support the paper's contribution, superiority, or efficiency narrative; do not audit every number.",
                     "Use prior findings and caveats to change the next question when needed.",
-                    "Reflection reports are coherent candidate reasoning, not paper evidence. Adopt, rewrite, defer, or reject their analysis; when verification is needed, preserve the relevant purpose in decision_relevance and assign one coherent bounded EvidenceTask rather than mechanically splitting every thought into separate tasks.",
+                    "Reflection reports are coherent candidate reasoning, not paper evidence. Adopt, rewrite, defer, or reject their analysis. Only when resolving a lead requires missing source evidence should you assign a bounded EvidenceTask, preserving that missing evidence and its purpose in decision_relevance; do not send Workers to re-reason about an already supplied relationship.",
                     "Use empty related_finding_ids for independent Discovery. Select up to three prior IDs only when testing an explicit relationship, contradiction, or alternative explanation.",
                     "Treat Worker suggested questions as candidate questions, not evidence; adopt, rewrite, prioritize, or ignore them based on the current state.",
                     "Before choosing the next action, inspect relationships among prior findings, caveats, and unresolved questions.",
+                    "Assign each task one or two applicable decision_checklist IDs in rubric_ids, or [] when none applies. These are task routing hints, not scores or verified classifications of every finding a Worker may discover. Use state.rubric_context_index to locate related finding IDs without repeating their evidence; inspect cross-rubric and unassigned findings when relevant, and never infer agreement or completeness from shared labels or coverage.",
                     "Investigate evidence that can add, qualify, bound, contradict, or change the assessment; a question may be valuable even when it will not reverse the overall judgment.",
-                    "When a relationship could change, qualify or bound the assessment without reversing it, use a bounded Cross-check task that tests it; do not let Cross-check automatically replace independent Discovery of unreviewed directions.",
+                    "Missing source evidence belongs to READ_PAPER; analysis of relationships among already available reports belongs to REFLECT. Worker Cross-check means checking a specific missing source passage, configuration, number or observation against an earlier report, not repeating the reports' integration. Workers still analyze their selected pages; Reflection cannot fetch new pages. Do not let either kind of check automatically replace valuable independent Discovery.",
                     "Do not repeat a near-duplicate search for an absent detail after a targeted confirmation unless new locator evidence points to a different source.",
                     "For every task, use that task's decision_relevance to preserve the unverified purpose, competing explanation, or judgment boundary that makes the question useful. For Cross-check, also name the relationship being tested. Do not present decision_relevance as paper evidence.",
                     "For a Cross-check task, optionally provide up to three related_finding_ids from state.findings; they are reports from prior Workers that the new Worker must independently test, not facts to accept automatically.",
@@ -678,12 +728,17 @@ class PaperAgentMaster:
                     "A stable overall assessment is not sufficient reason to stop when one bounded paper-internal question could still add a load-bearing finding or caveat.",
                     "Before DECIDE, check whether one independent direction not originating in Reflection remains unreviewed; investigate it only if it can add distinct evidence-bearing information, and do not add a task merely to satisfy this check.",
                     "Budget remaining is not evidence value. Do not continue because rounds remain; DECIDE once the accumulated evidence supports the paper judgment and every remaining gap is non-blocking, already paper-unreported, answerable only by code or external evidence, or unlikely to change the assessment.",
-                    "Once a targeted check establishes that a detail is paper-unreported, preserve it as unresolved and do not reopen it through another section, paraphrase, locator query, or Worker task unless new locator evidence identifies a specific unexamined source.",
-                    "Set pre_decide_reflection_focus only for one named unresolved mechanism conflict or unverified direction visible in accumulated evidence that could add or correct a material caveat to the proposed assessment; otherwise set it to null. Do not request Reflection as a general completeness check.",
+                    "At every turn assess reading value and verification value separately, not only before DECIDE: no useful new page search does not imply that existing findings have been integrated reliably. Identify whether one consequential proposed conclusion still depends on an unchecked cross-Worker inference, local-absence claim, evidence-scope expansion, or mechanism attribution.",
+                    "Once a targeted check establishes that a detail is paper-unreported, preserve it as unresolved and do not reopen it through another section, paraphrase, locator query, or Worker task unless new locator evidence identifies a specific unexamined source. This does not prohibit reviewing whether the existing evidence justified calling the detail unreported in the first place. Distinguish a confirmed reporting gap from an unchecked inference about the scope of inspected material.",
+                    "A useful focus may be one named unresolved mechanism conflict or an unverified evidence relationship underlying a consequential proposed conclusion. No new findings or already-identified contradiction is required: the Reflector tests the relationship, while you judge whether that test could materially qualify or correct the conclusion. Prior exposure to finding IDs is not proof that this particular relationship was checked. Do not request Reflection as a general completeness check or repeat an issue already resolved by the prior memo and evidence.",
+                    "For a valuable review, choose REFLECT and set reflection_focus to the specific proposed conclusion, the unverified relationship or scope inference, and how plausible outcomes could affect that conclusion. A material cross-Worker contradiction remains eligible, but do not invent one to obtain a review. You identify the question and value; the Reflector performs the substantive relationship analysis. Directly correct a trivial error already settled by explicit evidence rather than purchasing a redundant review. When skipping Reflection, explain in rationale why the strongest candidate relationship is already checked, immaterial, or cannot benefit from reasoning over supplied evidence; do not rely only on stable overall sentiment or covered rubric status, or consider only the first memo's topic.",
+                    "Select one or two decision_checklist IDs in reflection_rubric_ids. In rubric-union mode the runtime assembles ALL findings from tasks tagged with either selected rubric, including other Workers' findings. reflection_finding_ids are zero to six optional anchors, not a whitelist: use them to include relevant unassigned or cross-rubric evidence. You need not preselect both sides or solve the comparison yourself. Select the relevant dimensions rather than a general catch-all bucket; when no focus is needed use null and empty lists.",
+                    "After Reflection, use rationale to explain whether its proposed correction or qualification is adopted, needs a bounded Worker check, or is rejected with an evidence-based reason. If missing paper evidence cannot be obtained within the budget, retain the uncertainty rather than asserting that the issue is resolved.",
                     "For DECIDE, use evidence_sufficient when no material paper-internal gap remains; remaining_gaps_unreported when targeted checks found no report; remaining_gaps_external when only code or external evidence can resolve the gaps; otherwise use paper_saturated when further paper reading has no distinct evidence-bearing paper-internal direction.",
                     "Report checklist_coverage for the accumulated evidence. A covered item must correspond to a supported finding or bounded limitation. Checklist coverage records what has been examined; it is not by itself evidence that the paper judgment is complete.",
                     "DECIDE may retain honest unresolved_questions when they bound the conclusions but do not prevent a supported final judgment.",
-                    "Only READ_PAPER, DECIDE, and NEEDS_HUMAN are available.",
+                    "You may choose READ_PAPER and REFLECT together in the same turn using kind=READ_PAPER_AND_REFLECT. This is explicitly permitted when both are independently valuable; you need not choose only one. Supply independence_rationale explaining why neither branch needs the other's output. Both branches receive the same pre-round evidence snapshot: Reflection does not see this batch's new Worker findings, and Workers do not see this batch's Reflection. All results return before your next decision. If either branch depends on the other, request only the prerequisite action now and reconsider after its result; do not pre-plan an unconditional follow-up.",
+                    "Choose exactly one kind: READ_PAPER, REFLECT, READ_PAPER_AND_REFLECT, DECIDE, or NEEDS_HUMAN. DECIDE and NEEDS_HUMAN are exclusive: no tasks, reflection fields or pending work. REFLECT is available whenever reflection_budget.request_available is true, not a DECIDE option. The first mechanism Reflection remains automatic after the first reading batch; do not duplicate it. Respect the remaining Reflection budget and do not force a review merely to use it. Each explicit action batch, including standalone REFLECT, consumes one round; reserve a subsequent Master turn to integrate requested results and DECIDE.",
                     "Do not assign personal usefulness or reading-priority labels.",
                     "Do not treat the compact page index as verified paper evidence.",
                     "Use only paper text supplied to this Master call and Worker findings for final assessment.",
@@ -744,15 +799,19 @@ class PaperReflector:
         overview_text: str,
         recorder: ModelCallRecorder | None = None,
         paper_context_mode: str = "legacy",
+        reflection_context_mode: str = "rubric-union",
     ) -> None:
         if paper_context_mode not in PAPER_CONTEXT_MODES:
             raise ValueError("unsupported paper_context_mode")
+        if reflection_context_mode not in REFLECTION_CONTEXT_MODES:
+            raise ValueError("unsupported reflection_context_mode")
         self.llm = llm
         self.paper_name = paper_name
         self.page_index = page_index
         self.overview_text = overview_text
         self.recorder = recorder
         self.paper_context_mode = paper_context_mode
+        self.reflection_context_mode = reflection_context_mode
         self._last_call_id: str | None = None
 
     def __call__(
@@ -780,6 +839,8 @@ class PaperReflector:
                     "Explain the reasoning far enough for the Master to understand what may matter, why it may matter, and what paper-internal evidence would discriminate the plausible interpretations.",
                     "Do not claim to have read unprovided pages, provide new paper facts, make a final assessment, or automatically create a Worker task.",
                     "The memo is candidate reasoning, not paper evidence. Clearly distinguish observed Worker reports from inference, and leave any proposed explanation unverified until a Worker checks paper evidence.",
+                    "Use state.rubric_context_index as an ID-only navigation aid for the supplied findings. Its task_rubric_ids are inherited task routing hints, not verified finding classifications or scores. Compare relevant reports across Workers and rubric boundaries, including unassigned findings when supplied; shared labels do not establish agreement and different labels do not establish irrelevance.",
+                    "Within the requested reflection scope, also test material cross-Worker support, contradiction and qualification: does one report supply a template, partial specification or narrower evidence boundary that changes another report's claim? Distinguish not found in selected pages from not reported by the paper; unprovided information is not evidence of absence. Name the relevant finding IDs and distinguish a correction supported by their supplied evidence from a bounded Worker check still needed. This supplements mechanism reasoning, not a general completeness review; do not invent a conflict or claim to inspect unseen pages.",
                 ],
             }
         if self.paper_context_mode in {
@@ -797,21 +858,94 @@ class PaperReflector:
                 "Do not summarize Worker findings or repeat ordinary missing metrics, costs, baseline gaps, or completeness issues unless they expose that selected hidden assumption or evidence-scope mismatch.",
                 "Do not force a criticism. If the supplied evidence supports no material design consequence, say that plainly in the memo and explain the boundary of that conclusion.",
             ])
-        if trigger == "pre_decide" and proposed_decision is not None:
+        if trigger == "master_requested" and proposed_decision is not None:
             prompt_payload["proposed_decision"] = {
                 "assessment": proposed_decision.assessment,
                 "rationale": proposed_decision.rationale,
                 "unresolved_questions": list(proposed_decision.unresolved_questions),
                 "checklist_coverage": proposed_decision.checklist_coverage,
-                "pre_decide_reflection_focus": proposed_decision.pre_decide_reflection_focus,
+                "reflection_focus": proposed_decision.reflection_focus,
             }
             prompt_payload["instructions"].extend([
-                "Analyze only proposed_decision.pre_decide_reflection_focus; do not perform a second global omission, completeness, or brainstorming review.",
-                "Use only accumulated findings relevant to that named conflict; do not introduce unrelated mechanism, metric, cost, or completeness concerns.",
-                "Using only accumulated evidence, determine whether that named conflict exposes a material correction or qualification to the proposed assessment and whether one bounded paper-internal check could resolve it.",
-                "If it does not, say plainly that the proposed decision stands and do not recommend more reading. Do not reopen a paper-unreported, external, or merely interesting gap.",
-                "If it does, explain the exact conclusion at risk, missing paper evidence, and expected judgment delta; do not create a Worker task or claim new paper evidence.",
+                "Analyze only proposed_decision.reflection_focus; do not perform a second global omission, completeness, or brainstorming review.",
+                "Use only accumulated findings relevant to that named audit question; do not introduce unrelated mechanism, metric, cost, or completeness concerns. The focus is a question to test and does not assert that a contradiction exists.",
+                "Using only accumulated evidence, determine whether the named conclusion and its evidence relationships are supported, need qualification, or require a bounded paper-internal check. Evidence availability is not evidence of prior verification: the same findings can support a new relationship check even without new pages or findings.",
+                "If the supplied evidence supports the proposed conclusion and no material unchecked relationship remains within the focus, say plainly that the proposed decision stands and do not recommend more reading. Insufficient evidence to support a correction does not itself validate the conclusion: distinguish an unresolved input limitation from an evidence-supported endorsement. Do not repeat a resolved question or demand new experiments as if Reflection could supply them. You may examine whether an earlier paper-unreported label was justified by the actual inspected evidence scope.",
+                "If a bounded paper-internal check is needed, explain the exact conclusion at risk, missing paper evidence, and expected judgment delta; do not create a Worker task or claim new paper evidence.",
             ])
+        context_mode = "full-history"
+        context_rubric_ids: tuple[str, ...] = ()
+        context_finding_ids = tuple(
+            item["finding_id"] for item in prompt_payload["state"]["findings"]
+            if isinstance(item["finding_id"], str)
+        )
+        context_diagnostics: tuple[str, ...] = ()
+        if trigger == "master_requested" and self.reflection_context_mode == "rubric-union":
+            rubric_ids = () if proposed_decision is None else proposed_decision.reflection_rubric_ids
+            anchor_ids = () if proposed_decision is None else proposed_decision.reflection_finding_ids
+            if not rubric_ids or proposed_decision is None:
+                context_diagnostics = ("rubric_union_context_fallback:missing_selection",)
+            elif (
+                len(rubric_ids) > 2 or len(anchor_ids) > 6
+                or len(set(rubric_ids)) != len(rubric_ids)
+                or len(set(anchor_ids)) != len(anchor_ids)
+                or any(key not in REFLECTION_RUBRIC_GUIDANCE for key in rubric_ids)
+                or any(key not in context_finding_ids for key in anchor_ids)
+            ):
+                context_diagnostics = ("rubric_union_context_fallback:invalid_selection",)
+            else:
+                selected_ids = tuple(
+                    item["finding_id"] for item in prompt_payload["state"]["findings"]
+                    if item["finding_id"] in anchor_ids
+                    or set(rubric_ids).intersection(item.get("task_rubric_ids", ()))
+                )
+                if not selected_ids:
+                    context_diagnostics = ("rubric_union_context_fallback:no_matching_findings",)
+            if not context_diagnostics:
+                context_mode = "rubric-union"
+                context_rubric_ids = rubric_ids
+                context_finding_ids = selected_ids
+                full_state = prompt_payload["state"]
+                by_id = {item["finding_id"]: item for item in full_state["findings"]}
+                proposed_coverage = proposed_decision.checklist_coverage or {}
+                coverage = {
+                    key: proposed_coverage.get(key, full_state["checklist_coverage"][key])
+                    for key in rubric_ids
+                }
+                prompt_payload["state"] = {
+                    "findings": [by_id[key] for key in selected_ids],
+                    "checklist_coverage": coverage,
+                    "remaining_rounds": state.remaining_rounds,
+                }
+                prompt_payload["state"]["rubric_context_index"] = _rubric_context_index(
+                    prompt_payload["state"]["findings"]
+                )
+                prompt_payload["findings_to_reflect"] = list(selected_ids)
+                prompt_payload["context_selection"] = {
+                    "strategy": "rubric-union-plus-anchors",
+                    "anchor_finding_ids": list(anchor_ids),
+                    "total_available_findings": len(full_state["findings"]),
+                    "unassigned_findings_outside_slice": sum(
+                        not item.get("task_rubric_ids") and item["finding_id"] not in selected_ids
+                        for item in full_state["findings"]
+                    ),
+                }
+                prompt_payload["mechanism_audit_principles"] = [REFLECTION_RUBRIC_GUIDANCE[key] for key in rubric_ids]
+                prompt_payload["proposed_decision"] = {
+                    "reflection_focus": proposed_decision.reflection_focus,
+                    "checklist_coverage": coverage,
+                }
+                prompt_payload.pop("overview_pages", None)
+                prompt_payload.pop("compact_page_index", None)
+                prompt_payload["instructions"].append(
+                    "This is a rubric-assembled evidence slice plus optional anchors, not the full audit. "
+                    "Labels describe the originating tasks, not verified relevance or agreement. Test both support and counterevidence. "
+                    "An omitted fact or control is not evidence of absence; if the slice cannot resolve the question, "
+                    "state that input limitation rather than inventing facts or requesting a general review."
+                )
+        prompt_payload["context_mode"] = context_mode
+        prompt_payload["context_rubric_ids"] = list(context_rubric_ids)
+        prompt_payload["context_diagnostics"] = list(context_diagnostics)
         prompt = json.dumps(
             prompt_payload,
             ensure_ascii=False,
@@ -831,10 +965,14 @@ class PaperReflector:
         )
         self._last_call_id = call_id
         try:
-            return parse_reflection_report(
+            report = parse_reflection_report(
                 payload,
                 trigger=trigger,
                 reflected_finding_ids=finding_ids,
+            )
+            return replace(
+                report, context_mode=context_mode, context_finding_ids=context_finding_ids,
+                context_rubric_ids=context_rubric_ids, context_diagnostics=context_diagnostics,
             )
         except ValueError as exc:
             _mark_validation(self.recorder, call_id, str(exc))
@@ -859,9 +997,19 @@ def parse_reflection_report(
     )
 
 
+def _valid_task_rubric_ids(keys: object) -> bool:
+    return (
+        isinstance(keys, (list, tuple)) and len(keys) <= 2
+        and all(isinstance(key, str) and key in DECISION_CHECKLIST for key in keys)
+        and len(set(keys)) == len(keys)
+    )
+
+
 def parse_master_action(payload: object) -> MasterAction:
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
+    if any(key.startswith("pre_decide_reflection_") for key in payload):
+        raise ValueError("legacy_reflection_fields: use an explicit REFLECT action")
     kind = payload.get("kind")
     if not isinstance(kind, str):
         raise ValueError("kind must be a string")
@@ -887,12 +1035,16 @@ def parse_master_action(payload: object) -> MasterAction:
         decision_relevance = raw_task.get("decision_relevance", "")
         if not isinstance(decision_relevance, str):
             raise ValueError(f"task {index} decision_relevance must be a string")
+        rubric_ids = raw_task.get("rubric_ids", [])
+        if not isinstance(rubric_ids, list) or not _valid_task_rubric_ids(rubric_ids):
+            raise ValueError(f"task {index} rubric_ids must contain at most two unique decision_checklist IDs")
         tasks.append(
             EvidenceTask(
                 question=question,
                 source_scope=source_scope,
                 related_finding_ids=tuple(raw_related),
                 decision_relevance=decision_relevance,
+                rubric_ids=tuple(rubric_ids),
             )
         )
 
@@ -919,17 +1071,34 @@ def parse_master_action(payload: object) -> MasterAction:
             "expected_judgment_delta",
         )
     }
-    if kind == "READ_PAPER":
+    if kind in {"READ_PAPER", "READ_PAPER_AND_REFLECT"}:
         for field, value in marginal_value.items():
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(field)
-    focus = payload.get("pre_decide_reflection_focus")
+    focus = payload.get("reflection_focus")
     if focus is not None and (not isinstance(focus, str) or not focus.strip()):
-        raise ValueError("pre_decide_reflection_focus")
+        raise ValueError("reflection_focus")
+    reflection_selection: dict[str, tuple[str, ...]] = {}
+    for field, limit in (("reflection_rubric_ids", 2), ("reflection_finding_ids", 6)):
+        values = payload.get(field, [])
+        if (
+            not isinstance(values, list) or len(values) > limit
+            or any(not isinstance(value, str) or not value.strip() for value in values)
+        ):
+            raise ValueError(field)
+        normalized = tuple(value.strip() for value in values)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(field)
+        if field == "reflection_rubric_ids" and any(value not in DECISION_CHECKLIST for value in normalized):
+            raise ValueError(field)
+        reflection_selection[field] = normalized
     stop_reason_code = payload.get("stop_reason_code")
     if kind == "DECIDE" and stop_reason_code not in STOP_REASON_CODES:
         raise ValueError("stop_reason_code")
-    return MasterAction(
+    independence = payload.get("independence_rationale", "")
+    if not isinstance(independence, str):
+        raise ValueError("independence_rationale")
+    action = MasterAction(
         kind=kind,
         tasks=tuple(tasks),
         unresolved_questions=tuple(unresolved_items),
@@ -945,8 +1114,14 @@ def parse_master_action(payload: object) -> MasterAction:
             for field, value in marginal_value.items()
         },
         stop_reason_code=stop_reason_code if isinstance(stop_reason_code, str) else None,
-        pre_decide_reflection_focus=focus.strip() if isinstance(focus, str) else None,
+        reflection_focus=focus.strip() if isinstance(focus, str) else None,
+        independence_rationale=independence.strip(),
+        **reflection_selection,
     )
+    error = action_request_error(action)
+    if error:
+        raise ValueError(error)
+    return action
 
 
 def run_local_paper_agent(
@@ -961,12 +1136,15 @@ def run_local_paper_agent(
     paper_context_mode: str = "legacy",
     worker_parallelism: int = 1,
     max_reflections: int = 0,
+    reflection_context_mode: str = "rubric-union",
     investigation_target: str | None = None,
     on_progress: Callable[[str, dict[str, object]], None] | None = None,
     on_model_event: Callable[[str, ModelCallRecord], None] | None = None,
 ) -> AgentTrace:
     if paper_context_mode not in PAPER_CONTEXT_MODES:
         raise ValueError("unsupported paper_context_mode")
+    if reflection_context_mode not in REFLECTION_CONTEXT_MODES:
+        raise ValueError("unsupported reflection_context_mode")
     path = Path(pdf_path)
     pages = extract_pdf_pages(path)
     if not pages:
@@ -1001,6 +1179,7 @@ def run_local_paper_agent(
         recorder=recorder,
         worker_role_mode=worker_role_mode,
         reflection_enabled=bool(max_reflections),
+        max_reflections=max_reflections,
         investigation_target=investigation_target,
         master_context_mode=master_context_mode,
         paper_context_mode=paper_context_mode,
@@ -1026,6 +1205,7 @@ def run_local_paper_agent(
             overview_text=render_page_text(overview_pages),
             recorder=recorder,
             paper_context_mode=paper_context_mode,
+            reflection_context_mode=reflection_context_mode,
         )
         if max_reflections
         else None
@@ -1062,6 +1242,11 @@ def run_local_paper_agent(
             image_urls=None,
         )
         _, _, final_judgment = _parse_single_pass_result(payload, pages)
+        if paper_context_mode != "legacy":
+            final_judgment = _attach_finding_provenance(
+                payload, final_judgment,
+                tuple(record.finding_id for record in completed_finding_records(AgentState(steps=trace.steps))),
+            )
     except ValueError as exc:
         _mark_validation(recorder, locals().get("call_id"), str(exc))
     except Exception:
@@ -1143,6 +1328,21 @@ def _build_synthesis_prompt_from_history(
             for page in pages
         ]
         payload["compact_page_index"] = json.loads(page_index)
+    else:
+        payload["required_json_shape"]["key_findings"][0]["source_finding_ids"] = ["r1-t1-f1"]
+        payload["required_json_shape"]["finding_dispositions"] = [{
+            "finding_id": "r1-t1-f1",
+            "status": "retained|merged|corrected|unresolved|discarded",
+            "reason": "where the finding is represented, or why it was corrected, left unresolved, or discarded",
+        }]
+        payload["instructions"].extend([
+            "For each final key finding, list the existing Worker finding IDs used to form, qualify, or correct it in source_finding_ids. Include all findings needed for a cross-finding inference, and distinguish supporting evidence from a prior interpretation being corrected in the finding and caveat. Never cite Master assessments or Reflection as evidence, and never invent an ID.",
+            "Return exactly one finding_dispositions entry for every Worker finding_id in history.findings. Use retained for a preserved finding, merged when combined with another finding, corrected when stronger supplied evidence corrects it, unresolved for a material unresolved issue, or discarded for a finding that should not survive. Give a substantive reason for each disposition; do not mark an issue discarded merely to shorten the report or because it does not reverse the overall assessment.",
+            "Retained, merged, and corrected findings must be referenced by a final key finding. A merged finding shares a final key finding with another source ID. Preserve unresolved issues in unresolved_questions or an explicit linked finding/caveat. Do not link discarded findings as support. These links document provenance; they do not make unsupported conclusions valid.",
+        ])
+    payload["instructions"].append(
+        "Use history.rubric_context_index to reconcile related Worker findings, including cross-rubric and unassigned evidence. The index contains inherited task routing hints, not scores or verified finding classifications. Preserve each finding's evidence scope; a detail absent from one Worker's selected pages is not evidence of absence from the paper, especially when another report supplies a relevant template or partial specification. Do not suppress a finding because its task labels differ from the conclusion it qualifies."
+    )
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -1383,6 +1583,79 @@ def _parse_checklist_coverage(
     )
 
 
+def _attach_finding_provenance(
+    payload: dict[str, object], judgment: FinalJudgment, finding_ids: Sequence[str],
+) -> FinalJudgment:
+    """Check structural traceability without discarding a usable model judgment.
+
+    Complete means all links and dispositions are accounted for, not that the
+    model's evidence interpretation or reasons are semantically correct.
+    """
+    known = set(finding_ids)
+    warnings: set[str] = set()
+    linked: dict[str, list[int]] = {key: [] for key in finding_ids}
+    final_findings: list[FinalJudgmentFinding] = []
+    for index, (finding, raw) in enumerate(zip(judgment.key_findings, payload["key_findings"]), start=1):
+        raw_ids = raw.get("source_finding_ids", [])
+        if not isinstance(raw_ids, list) or any(not isinstance(key, str) or not key.strip() for key in raw_ids):
+            warnings.add(f"invalid_source_finding_ids:{index}")
+            raw_ids = []
+        source_ids: list[str] = []
+        for key in raw_ids:
+            key = key.strip()
+            if key not in known:
+                warnings.add(f"unknown_source_finding:{index}:{key}")
+            elif key not in source_ids:
+                source_ids.append(key)
+                linked[key].append(index)
+        if not source_ids:
+            warnings.add(f"unlinked_final_finding:{index}")
+        final_findings.append(replace(finding, source_finding_ids=tuple(source_ids)))
+
+    raw_dispositions = payload.get("finding_dispositions", [])
+    if not isinstance(raw_dispositions, list):
+        warnings.add("invalid_finding_dispositions")
+        raw_dispositions = []
+    dispositions: list[FindingDisposition] = []
+    seen: set[str] = set()
+    for raw in raw_dispositions:
+        if not isinstance(raw, dict) or not isinstance(raw.get("finding_id"), str):
+            warnings.add("invalid_disposition")
+            continue
+        key = raw["finding_id"].strip()
+        if key not in known:
+            warnings.add(f"unknown_disposition_finding:{key}")
+            continue
+        status, reason = raw.get("status"), raw.get("reason")
+        if (
+            not isinstance(status, str)
+            or status not in {"retained", "merged", "corrected", "unresolved", "discarded"}
+            or not isinstance(reason, str) or not reason.strip()
+        ):
+            warnings.add(f"invalid_disposition:{key}")
+            continue
+        if key in seen:
+            warnings.add(f"duplicate_disposition:{key}")
+            continue
+        seen.add(key)
+        targets = tuple(linked[key])
+        if status in {"retained", "merged", "corrected"} and not targets:
+            warnings.add(f"unlinked_disposition:{key}")
+        if status == "merged" and targets and not any(len(final_findings[i - 1].source_finding_ids) > 1 for i in targets):
+            warnings.add(f"unmerged_disposition:{key}")
+        if status == "discarded" and targets:
+            warnings.add(f"discarded_finding_still_linked:{key}")
+        if status == "unresolved" and not targets and not judgment.unresolved_questions:
+            warnings.add(f"unrepresented_unresolved_finding:{key}")
+        dispositions.append(FindingDisposition(key, status, reason.strip(), targets))
+    warnings.update(f"unaccounted_finding:{key}" for key in known - seen)
+    return replace(
+        judgment, key_findings=tuple(final_findings), finding_dispositions=tuple(dispositions),
+        provenance_status="incomplete" if warnings else "complete",
+        provenance_warnings=tuple(sorted(warnings)),
+    )
+
+
 def _build_locator_prompt(
     *,
     question: str,
@@ -1390,6 +1663,7 @@ def _build_locator_prompt(
     page_index: str,
     page_count: int,
     research_context: Sequence[ResearchContext] = (),
+    rubric_ids: Sequence[str] = (),
 ) -> str:
     payload: dict[str, object] = {
             "question": question,
@@ -1413,6 +1687,11 @@ def _build_locator_prompt(
         instructions.append(
             "decision_context is the Master's unverified reason for asking, not paper evidence; use it only to locate evidence that could support, qualify, contradict, or distinguish the stated possibilities."
         )
+    if rubric_ids:
+        payload["rubric_focus"] = {key: REFLECTION_RUBRIC_GUIDANCE[key] for key in rubric_ids}
+        instructions.append(
+            "rubric_focus gives task routing hints, not paper claims or evidence. Use it to locate sources for this question; do not widen the task to fill a rubric."
+        )
     if research_context:
         payload["research_context"] = _research_context_payload(research_context)
         instructions.extend([
@@ -1434,6 +1713,7 @@ def _build_evidence_prompt(
     image_inputs: Sequence[ImageInputRef],
     research_context: Sequence[ResearchContext] = (),
     role_instructions: Sequence[str] = (),
+    rubric_ids: Sequence[str] = (),
 ) -> str:
     payload: dict[str, object] = {
             "paper": paper_name,
@@ -1489,6 +1769,14 @@ def _build_evidence_prompt(
             0,
             "research_context contains evidence and interpretations reported by another Worker, not facts to accept automatically; independently verify, qualify, or contradict the relevant relationship using the selected pages, and support every new finding with those pages.",
         )
+    if rubric_ids:
+        payload["rubric_focus"] = {key: REFLECTION_RUBRIC_GUIDANCE[key] for key in rubric_ids}
+        payload["instructions"].append(
+            "rubric_focus explains the assigned evidence question, not a scoring form or a requirement the paper must satisfy. Preserve additional material local findings even outside these routing labels."
+        )
+    payload["instructions"].append(
+        "A detail absent from selected pages is not evidence of absence from the paper. State the inspected scope; preserve any relevant template, appendix reference or partial specification that could qualify a missing-detail claim."
+    )
     payload["instructions"].extend(role_instructions)
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -1498,7 +1786,7 @@ def _worker_role_instructions(task: EvidenceTask, mode: str) -> tuple[str, ...]:
         return ()
     if task.related_finding_ids:
         return (
-            "Act as a cross-finding reviewer.",
+            "Act as a source-grounded cross-check analyst: obtain and analyze the missing page evidence, not merely re-integrate prior reports.",
             "Check whether the selected pages support, conflict with, qualify, or offer an alternative explanation for the research leads.",
             "Check whether multiple components, candidate sources, access paths, or budgets change together.",
             "When an inference depends on research_context plus current-page evidence, name the related finding IDs in the finding and separate current-page observations from the cross-finding inference.",
@@ -1518,7 +1806,7 @@ def _role_mixed_master_instructions(mode: str) -> list[str]:
         "First round normally uses Discovery because no prior finding is available.",
         "Later READ_PAPER actions may mix Discovery and Cross-check tasks when both are independently useful.",
         "Cross-check supplements Discovery; it does not replace unreviewed mechanisms, negative results, experimental dimensions, or paper directions.",
-        "Use Cross-check when relationships among findings could change, qualify, or bound the assessment, with at most three related_finding_ids and decision_relevance.",
+        "Use Cross-check only when missing source evidence must be inspected to test a prior report, with at most three related_finding_ids and decision_relevance; existing-evidence integration belongs to REFLECT.",
         "do not force one task of each kind or create tasks merely for count.",
         "Do not choose a single Worker role merely because it was used in the previous round; choose each task by the evidence gap it addresses.",
         "Do not stop Discovery merely because every checklist label is covered when a distinct unreviewed evidence-bearing direction remains; checklist coverage alone is neither a stop rule nor a reason to continue.",
@@ -1528,7 +1816,7 @@ def _role_mixed_master_instructions(mode: str) -> list[str]:
 
 def _research_context_payload(
     context: Sequence[ResearchContext],
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     payload: list[dict[str, object]] = []
     for item in context:
         record: dict[str, object] = {
@@ -1540,6 +1828,7 @@ def _research_context_payload(
             "evidence_type": item.evidence_type,
             "evidence_locator": item.evidence_locator,
             "decision_relevance": item.decision_relevance,
+            "task_rubric_ids": list(item.task_rubric_ids),
         }
         if len(item.evidence_items) > 1:
             record["evidence_items"] = [
@@ -1849,6 +2138,33 @@ def _mark_validation(
         recorder.validation_error(call_id, error)
 
 
+def _rubric_context_index(findings: Sequence[dict[str, object]]) -> dict[str, object]:
+    """Index existing IDs by task routing hints; never classify or copy evidence."""
+    by_rubric: dict[str, list[str]] = {}
+    unassigned: list[str] = []
+    for finding in findings:
+        finding_id = finding.get("finding_id")
+        if not isinstance(finding_id, str):
+            continue
+        keys = finding.get("task_rubric_ids", [])
+        if not keys:
+            unassigned.append(finding_id)
+        for key in keys:
+            by_rubric.setdefault(key, []).append(finding_id)
+    return {"by_rubric": by_rubric, "unassigned_finding_ids": unassigned}
+
+
+def _reflection_action_fields(action: MasterAction) -> dict[str, object]:
+    if action.kind not in {"REFLECT", "READ_PAPER_AND_REFLECT"}:
+        return {}
+    return {
+        "reflection_focus": action.reflection_focus,
+        "reflection_rubric_ids": list(action.reflection_rubric_ids),
+        "reflection_finding_ids": list(action.reflection_finding_ids),
+        "independence_rationale": action.independence_rationale,
+    }
+
+
 def _state_payload(state: AgentState) -> dict[str, object]:
     cumulative_unresolved = tuple(
         dict.fromkeys(
@@ -1861,11 +2177,13 @@ def _state_payload(state: AgentState) -> dict[str, object]:
     for step in state.steps:
         if step.action.checklist_coverage:
             coverage.update(step.action.checklist_coverage)
+    findings = _state_findings(state)
     return {
         "history": [
             {
                 "round_number": step.round_number,
                 "kind": step.action.kind,
+                **_reflection_action_fields(step.action),
                 "questions": [task.question for task in step.action.tasks],
                 "rationale": step.action.rationale,
                 "assessment": step.action.assessment,
@@ -1877,7 +2195,8 @@ def _state_payload(state: AgentState) -> dict[str, object]:
             }
             for step in state.steps
         ],
-        "findings": _state_findings(state),
+        "findings": findings,
+        "rubric_context_index": _rubric_context_index(findings),
         "worker_failures": _worker_failure_diagnostics(state),
         "worker_suggested_questions": [
             {
@@ -1893,6 +2212,10 @@ def _state_payload(state: AgentState) -> dict[str, object]:
                 "reflected_finding_ids": list(report.reflected_finding_ids),
                 "reflection_memo": report.reflection_memo,
                 "error": report.error,
+                "context_mode": report.context_mode,
+                "context_finding_ids": list(report.context_finding_ids),
+                "context_rubric_ids": list(report.context_rubric_ids),
+                "context_diagnostics": list(report.context_diagnostics),
             }
             for report in state.reflection_reports
         ],
@@ -1936,6 +2259,7 @@ def _master_state_payload(state: AgentState) -> dict[str, object]:
             "question": record.question,
             "finding": record.finding,
             "caveat": record.caveat,
+            "task_rubric_ids": list(record.task_rubric_ids),
             "evidence_type": record.evidence_type,
             "evidence_locator": record.evidence_locator,
             "pages_read": list(result.pages_read),
@@ -1956,34 +2280,45 @@ def _master_state_payload(state: AgentState) -> dict[str, object]:
     latest_action = None if latest_step is None else {
         "round_number": latest_step.round_number,
         "kind": latest_step.action.kind,
+        **_reflection_action_fields(latest_step.action),
         "conclusion_at_risk": latest_step.action.conclusion_at_risk,
         "missing_evidence": latest_step.action.missing_evidence,
         "expected_judgment_delta": latest_step.action.expected_judgment_delta,
     }
     latest_reflection = state.reflection_reports[-1] if state.reflection_reports else None
-    latest_suggestions = next(
-        (result for result in reversed(state.findings) if result.suggested_questions), None
-    )
+    latest_reflection_request = next((
+        _reflection_action_fields(step.action) for step in reversed(state.steps)
+        if step.action.kind in {"REFLECT", "READ_PAPER_AND_REFLECT"}
+    ), {})
+    latest_results = next((step.results for step in reversed(state.steps) if step.results), ())
     return {
         "completed_tasks": completed_tasks,
         "findings": findings,
+        "rubric_context_index": _rubric_context_index(findings),
         "worker_failures": _worker_failure_diagnostics(state),
         "latest_action": latest_action,
         "latest_reflection_report": None if latest_reflection is None else {
+            **latest_reflection_request,
             "trigger": latest_reflection.trigger,
             "reflected_finding_ids": list(latest_reflection.reflected_finding_ids),
             "reflection_memo": latest_reflection.reflection_memo,
             "error": latest_reflection.error,
+            "context_mode": latest_reflection.context_mode,
+            "context_finding_ids": list(latest_reflection.context_finding_ids),
+            "context_rubric_ids": list(latest_reflection.context_rubric_ids),
+            "context_diagnostics": list(latest_reflection.context_diagnostics),
         },
         "provisional_assessment": state.provisional_assessment,
         "unresolved_questions": state.unresolved_questions,
         "checklist_coverage": coverage,
         "remaining_rounds": state.remaining_rounds,
-        "latest_worker_suggested_questions": [] if latest_suggestions is None else [
+        "latest_worker_suggested_questions": [
             {
-                "origin_question": latest_suggestions.task.question,
-                "questions": list(latest_suggestions.suggested_questions),
+                "origin_question": result.task.question,
+                "questions": list(result.suggested_questions),
             }
+            for result in latest_results
+            if result.suggested_questions
         ],
     }
 
@@ -2022,6 +2357,7 @@ def _state_findings(state: AgentState) -> list[dict[str, object]]:
                         {
                             "finding_id": record.finding_id,
                             "question": record.question,
+                            "task_rubric_ids": list(record.task_rubric_ids),
                             "finding": record.finding,
                             "evidence": record.evidence,
                             "caveat": record.caveat,
@@ -2044,6 +2380,7 @@ def _state_findings(state: AgentState) -> list[dict[str, object]]:
         {
             "finding_id": _finding_id_for_result(state, result),
             "question": result.task.question,
+            "task_rubric_ids": list(result.task.rubric_ids),
             "finding": result.finding,
             "evidence": result.evidence,
             "caveat": result.caveat,

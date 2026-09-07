@@ -17,7 +17,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     return run_audit(
         args.paper,
         args.output,
-        config=AuditConfig(worker_parallelism=args.worker_parallelism),
+        config=AuditConfig(
+            worker_parallelism=args.worker_parallelism,
+            reflection_context_mode=args.reflection_context,
+        ),
     )
 
 
@@ -33,6 +36,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=range(1, 5),
         default=2,
         metavar="{1,2,3,4}",
+    )
+    audit.add_argument(
+        "--reflection-context",
+        choices=("full-history", "rubric-union"),
+        default="rubric-union",
+        help="Context for the optional second Reflection (default: rubric-union)",
     )
     external_audit = subparsers.add_parser(
         "external-audit", help="Audit external evidence after a completed paper-only result"

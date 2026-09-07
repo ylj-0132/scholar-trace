@@ -16,6 +16,13 @@ stated otherwise, so their token and latency numbers describe observed runs,
 not stable benchmark estimates. Human reading notes were used after each run to
 compare substantive issue coverage; they were never included in model context.
 
+The sections below retain the terminology and availability at each historical
+checkpoint. As of September 7, the formal default is v20 `rubric-union`, with
+explicit `full-history`; the old focused and routing implementations have been
+removed. Historical statements about upcoming runs or retained variants are not
+current operating instructions. See the [current comparison and limits](HARNESSBANK_VERSION_COMPARISON.md)
+and [cleanup record](V20_FORMALIZATION.md).
+
 ## Starting with a comparable single-pass baseline
 
 The earliest implementation sent the extracted paper to one model and asked
@@ -484,6 +491,33 @@ sequential dependencies. The change saves wall time but not tokens or search
 cost, and was verified with an offline synchronization test rather than another
 paid ReMe run.
 
+## Preparing finding accounting and focused Reflection experiments
+
+The next implementation adds explicit Worker-to-judgment links and a disposition
+ledger to history-only Synthesis. Structural omissions and invalid links become
+diagnostics without discarding a completed judgment. This targets the previously
+observed gap between collecting a finding and preserving it in the final result;
+it does not independently verify the model's reasoning or prove that its chosen
+merges and discard reasons are justified.
+
+The optional second Reflection now supports a rubric-focused input selected by
+Master: one or two rubric dimensions and one to six existing findings, with
+their evidence and caveats. The first Reflection retains its broader input.
+The full-history second-Reflection mode remains available for comparison, and
+fallbacks caused by missing or invalid references are recorded explicitly.
+Both modes use the updated Master selection contract and Synthesis accounting;
+this comparison isolates the Reflection input policy, not the entire previous
+public version. The same change also fixes incremental Master context to retain
+suggestions from every Worker in the latest batch.
+
+These changes have offline behavioral tests, including a fake-client end-to-end
+audit, but no paid paper run yet. A first real run should inspect finding
+dispositions and semantic omissions, confirm whether a second Reflection was
+actually triggered and focused, and examine whether its proposed discriminating
+question survived the next Master decision. A run without a second Reflection
+provides no evidence about that input experiment. Token savings and judgment
+quality gains must be measured rather than inferred from passing tests.
+
 ## What remains outside the current system
 
 The supported CLI keeps paper reading and external evidence as separate,
@@ -504,6 +538,128 @@ whether the paper's own method, appendices, ablations, experiments, and bounded
 external evidence support the stated interpretation. Missing code, unreported
 chronology, or an unmatched control remains unresolved rather than being
 converted into a negative fact.
+
+## September 6: rubric routing and additive report-consistency prompts
+
+The OneDayAgent original/current canary exposed an evidence-scope problem in
+both versions: a local missing-detail report survived into a broad final
+limitation. In the original run, another Worker had even received the relevant
+appendix template page, but the reports were not sufficiently reconciled. Both
+runs used only the first Reflection; neither tested the focused second review.
+This is a single-paper observation, not a quality benchmark or causal attribution
+to one prompt change.
+
+The next implementation preserves the existing mechanism Reflection and adds
+cross-Worker support/contradiction/qualification checks to its prompt. Master is
+explicitly told that material evidence-scope conflicts can justify a named second
+Reflection. The controller's optional triggering and two-review budget are not
+changed; this is not the proposed automatic pre-decision review experiment.
+
+Rubric also becomes context-routing metadata: task rubric labels flow into finding records,
+and an ID-only index groups related reports for Master, Reflection and Synthesis.
+Workers receive assigned rubric guidance. Labels describe the originating task,
+not verified classifications or evidence strength. Unassigned findings stay
+visible, cross-dimension relationships remain allowed, and focused Reflection
+indexes only its actual selected evidence. No new model call or duplicated
+evidence store is added. Offline payload and regression tests establish these
+contracts, not improved reasoning quality; a paid follow-up run has not been made.
+
+The inherited self-evolution investigation target is a separate known issue and
+is not changed by this rubric/Reflection patch.
+
+### Follow-up: verification value without requiring novel findings
+
+The rubric-routing canary completed with one first-round batch and one Reflection.
+All 28 findings had already been supplied to that first review, which analyzed one
+mechanism issue rather than every evidence relationship. The old novelty gate would
+have prevented a second review even if Master had named another valuable question.
+Earlier canaries had new findings but still selected no focus. These are distinct
+failure paths, not evidence that the model's attention mechanism was measured.
+
+The next change removes the novelty prerequisite while preserving optional
+Master-requested reflection and the two-review budget. Master now judges reading
+value separately from verification value; it need not first establish a contradiction.
+It names the conclusion and uncertain relationship, or explains why the strongest
+candidate needs no review. The original mechanism reflection is retained.
+
+Rubric-focused input is now assembled from every finding whose originating task
+matches either selected dimension, plus up to six optional explicit anchors for
+cross-dimension or unassigned evidence. It no longer requires Master to preselect
+both sides of the comparison. The assembled set is not capped at six or silently
+truncated. Full-history remains a separate comparison mode; missing or empty
+selections record explicit fallback diagnostics. This changes both triggering and
+context selection and must not be described as a single-variable ablation.
+
+The follow-up OneDayAgent run completed three reading rounds and nine Worker
+tasks, but again selected no second Reflection. Master had 50 findings, including
+15 added after the first review, and explained why the original mechanism question
+remained an uncertainty. It did not nominate another evidence relationship for
+focused review, so the rubric-union branch was not exercised by a real model call.
+The run used 24 logical calls, 331,355 returned tokens and 692.7 seconds, including
+one recovered connection failure. Additional reading clarified the judge mismatch
+but repeatedly pursued the inherited cross-task-evolution target and still omitted
+page 8's execution observations. Synthesis also omitted source IDs from all 13
+final findings: 50 disposition links and 13 final-finding links were diagnosed as
+missing, and provenance was marked incomplete. The 275 passing offline tests
+validate routing contracts, not a demonstrated improvement in audit quality.
+
+### Follow-up: independent reading and reflection actions
+
+The next revision removes the inherited self-evolution investigation target from
+the supported runner and replaces it with the paper's own claims. This explicitly
+changes the task framing, so the next run is not a same-target ablation.
+
+Master can now request REFLECT independently, READ_PAPER for missing source
+evidence, or READ_PAPER_AND_REFLECT when both are independently useful. The prompts
+explicitly permit that combination and require an independence rationale. Both
+branches use the pre-round snapshot and join before another Master call; they cannot
+consume each other's new output in the same batch. DECIDE is exclusive. The old
+decision-deferral route is removed, but the first automatic mechanism review,
+two-review cap, rubric-union context and diagnostic fallbacks remain. Standalone
+Reflection now consumes a round within the five-round budget. These are changes
+to routing, prompting and task framing together, not proof of improved judgment.
+
+The one real follow-up used five reading rounds, eight Worker tasks and 23 model
+calls (294,046 returned tokens; 393.6 seconds; no retries). Every Master call
+received the new target and action contracts; later calls had Reflection available,
+but none selected REFLECT or the combined action. The old cross-task-evolution
+detour disappeared, page 8's repair/compression observations were retained, and
+all 38 findings received final source links. One merged-versus-retained labeling
+warning remained. However, the final two rounds revisited duration framing on
+overlapping pages, and Master spent its last round on reading rather than DECIDE.
+The loop ended NEEDS_HUMAN with round_budget_exhausted before the existing
+Synthesis fallback generated a report. This tests the implementation and target
+cleanup, not successful live reflection routing or normal decision completion.
+
+## September 7: formalizing v20 after the HarnessBank comparisons
+
+The three completed HarnessBank audits all reached DECIDE, using 206,225 tokens
+for the focused reconstruction, 174,581 for routing, and 191,163 for v20. Each
+used only the first automatic Reflection. They therefore did not compare the
+second-Reflection selectors or exercise v20's explicit reflection actions.
+
+A separate fixed-state experiment compared four Reflection inputs with the same
+modern v20 duty prompt, question, rubrics, anchors and model: full history
+(33 findings, 22,777 tokens), focused (2, 2,649), routing (2, 2,671), and v20 union
+(18, 12,191). Each succeeded once; no Master, Worker or Synthesis followed.
+This was not a replay of four historical prompt/controller versions.
+
+In this case v20 used 46.48% fewer total tokens than full history and explicitly
+used the distinction between K=1 candidate selection and K=3 final evaluation.
+That distinction was already in a Worker finding; Reflection integrated it into
+the comparison boundary rather than discovering a new paper fact. Full history
+also preserved the main judgment without obvious drift. One deliberately
+selected case cannot establish stable superiority or downstream audit gains.
+The [detailed comparison](HARNESSBANK_VERSION_COMPARISON.md) links the immutable
+inputs, outputs and reviews.
+
+Formalization names the existing union `rubric-union`, retains full history as
+an explicit option, and removes the retired runnable reconstructions and their
+shared launcher. The standalone comparison script now offers only the two
+current native inputs. Historical four-group manifests, hashes, prompts and
+results remain evidence of the original experiment, not a promise that the
+adjusted script can reproduce it byte-for-byte. The next possible work on
+Locator/Worker completeness and missing-detail interpretation remains deferred.
 
 ## Condensed timeline
 

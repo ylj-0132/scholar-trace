@@ -11,3 +11,9 @@ dist/
 data/
 paper/
 local_archive/
+
+# Local planning notes and frozen experiment copies; public runners stay tracked.
+docs/superpowers/
+variants/harnessbank-20260906/current-v20/
+variants/harnessbank-20260906/rubric-focused-reconstructed/
+variants/harnessbank-20260906/rubric-routing-reconstructed/

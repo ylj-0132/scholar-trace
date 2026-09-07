@@ -7,13 +7,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from typing import Callable, Literal, Protocol
 
-ActionKind = Literal["READ_PAPER", "DECIDE", "NEEDS_HUMAN"]
+ActionKind = Literal["READ_PAPER", "REFLECT", "READ_PAPER_AND_REFLECT", "DECIDE", "NEEDS_HUMAN"]
 @dataclass(frozen=True)
 class EvidenceTask:
     question: str
     source_scope: str = "paper"
     related_finding_ids: tuple[str, ...] = ()
     decision_relevance: str = ""
+    rubric_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class ResearchContext:
     evidence_locator: str
     decision_relevance: str
     evidence_items: tuple[FindingEvidence, ...] = ()
+    task_rubric_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,10 @@ class MasterAction:
     missing_evidence: str = ""
     expected_judgment_delta: str = ""
     stop_reason_code: str | None = None
-    pre_decide_reflection_focus: str | None = None
+    reflection_focus: str | None = None
+    reflection_rubric_ids: tuple[str, ...] = ()
+    reflection_finding_ids: tuple[str, ...] = ()
+    independence_rationale: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +94,10 @@ class ReflectionReport:
     reflected_finding_ids: tuple[str, ...]
     reflection_memo: str = ""
     error: str | None = None
+    context_mode: str = "full-history"
+    context_finding_ids: tuple[str, ...] = ()
+    context_rubric_ids: tuple[str, ...] = ()
+    context_diagnostics: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -163,6 +172,15 @@ class FinalJudgmentFinding:
     finding: str
     evidence: tuple[JudgmentEvidence, ...]
     caveat: str
+    source_finding_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FindingDisposition:
+    finding_id: str
+    status: str
+    reason: str
+    final_finding_indexes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -171,6 +189,9 @@ class FinalJudgment:
     key_findings: tuple[FinalJudgmentFinding, ...]
     unresolved_questions: tuple[str, ...] = ()
     checklist_coverage: dict[str, str] | None = None
+    finding_dispositions: tuple[FindingDisposition, ...] = ()
+    provenance_status: str = "not_checked"
+    provenance_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -254,95 +275,81 @@ def run_paper_agent(
         )
 
     for round_number in range(1, max_rounds + 1):
-        while True:
-            try:
-                action = master(state)
-            except Exception as exc:
-                return finish(_invalid_action_trace(
-                    state.steps,
-                    f"master_error@round_{round_number}:{type(exc).__name__}: {exc}",
-                ))
+        try:
+            action = master(state)
+        except Exception as exc:
+            return finish(_invalid_action_trace(
+                state.steps,
+                f"master_error@round_{round_number}:{type(exc).__name__}: {exc}",
+            ))
 
-            if not isinstance(action, MasterAction):
-                return finish(_invalid_action_trace(
-                    state.steps,
-                    f"invalid_master_output@round_{round_number}:{type(action).__name__}",
-                ))
+        if not isinstance(action, MasterAction):
+            return finish(_invalid_action_trace(
+                state.steps,
+                f"invalid_master_output@round_{round_number}:{type(action).__name__}",
+            ))
 
-            if action.kind == "DECIDE":
-                if (
-                    reflector is not None
-                    and max_reflections
-                    and not state.steps
-                    and not reflection_reports
-                ):
-                    step = TraceStep(round_number, action)
-                    return finish(_invalid_action_trace(
-                        state.steps + (step,),
-                        _record_master_error(
-                            master, "decide_before_required_method_reflection"
-                        ),
-                    ))
-                finding_ids = _successful_finding_ids(state)
-                last_reflected = (
-                    reflection_reports[-1].reflected_finding_ids
-                    if reflection_reports else ()
-                )
-                new_finding_ids = tuple(
-                    finding_id for finding_id in finding_ids
-                    if finding_id not in last_reflected
-                )
-                if (
-                    reflector is not None
-                    and len(reflection_reports) < max_reflections
-                    and new_finding_ids
-                    and action.pre_decide_reflection_focus is not None
-                ):
-                    deferred_decisions.append(
-                        DeferredDecision(round_number, "pre_decide", new_finding_ids, action)
-                    )
-                    report = _run_reflection(
-                        reflector, state, "pre_decide", new_finding_ids,
-                        round_number, on_progress, action,
-                    )
-                    reflection_reports.append(report)
-                    if report.error is not None:
-                        return finish(_invalid_action_trace(
-                            state.steps,
-                            f"reflection_error@round_{round_number}:{report.error}",
-                        ))
-                    state = replace(state, reflection_reports=tuple(reflection_reports))
-                    continue
-                step = TraceStep(round_number, action)
-                reason = _reason(action.rationale, "master_decided")
-                if not _is_empty_string(action.assessment):
-                    return finish(AgentTrace(
-                        steps=state.steps + (step,),
-                        outcome="DECIDE",
-                        assessment=action.assessment,
-                        stop_reason=reason,
-                        stop_reason_code=action.stop_reason_code,
-                    ))
-                return finish(_invalid_action_trace(
-                    state.steps + (step,),
-                    _record_master_error(master, "decide_without_assessment"),
-                ))
-
-            if action.kind == "NEEDS_HUMAN":
-                step = TraceStep(round_number, action)
-                return finish(AgentTrace(
-                    steps=state.steps + (step,),
-                    outcome="NEEDS_HUMAN",
-                    assessment=action.assessment,
-                    stop_reason=_reason(action.rationale, "master_requested_human"),
-                ))
-
-            if action.kind != "READ_PAPER":
+        action_error = action_request_error(action)
+        if action_error is not None:
+            return finish(_invalid_action_trace(
+                state.steps + (TraceStep(round_number, action),),
+                _record_master_error(master, action_error),
+            ))
+        wants_reflection = action.kind in {"REFLECT", "READ_PAPER_AND_REFLECT"}
+        wants_reading = action.kind in {"READ_PAPER", "READ_PAPER_AND_REFLECT"}
+        finding_ids = _successful_finding_ids(state)
+        if wants_reflection:
+            error = (
+                "reflection_requires_existing_evidence" if not finding_ids
+                else "reflection_budget_exhausted" if reflector is None or len(reflection_reports) >= max_reflections
+                else "reflection_requires_method_review" if not reflection_reports
+                else None
+            )
+            if error:
                 return finish(_invalid_action_trace(
                     state.steps + (TraceStep(round_number, action),),
-                    _record_master_error(master, f"unsupported_action:{action.kind}"),
+                    _record_master_error(master, error),
                 ))
 
+        if action.kind == "DECIDE":
+            if (
+                reflector is not None
+                and max_reflections
+                and not state.steps
+                and not reflection_reports
+            ):
+                step = TraceStep(round_number, action)
+                return finish(_invalid_action_trace(
+                    state.steps + (step,),
+                    _record_master_error(
+                        master, "decide_before_required_method_reflection"
+                    ),
+                ))
+            step = TraceStep(round_number, action)
+            reason = _reason(action.rationale, "master_decided")
+            if not _is_empty_string(action.assessment):
+                return finish(AgentTrace(
+                    steps=state.steps + (step,),
+                    outcome="DECIDE",
+                    assessment=action.assessment,
+                    stop_reason=reason,
+                    stop_reason_code=action.stop_reason_code,
+                ))
+            return finish(_invalid_action_trace(
+                state.steps + (step,),
+                _record_master_error(master, "decide_without_assessment"),
+            ))
+
+        if action.kind == "NEEDS_HUMAN":
+            step = TraceStep(round_number, action)
+            return finish(AgentTrace(
+                steps=state.steps + (step,),
+                outcome="NEEDS_HUMAN",
+                assessment=action.assessment,
+                stop_reason=_reason(action.rationale, "master_requested_human"),
+            ))
+
+        if wants_reading:
             action_error = _read_action_error(action)
             if action_error is not None:
                 return finish(_invalid_action_trace(
@@ -350,69 +357,93 @@ def run_paper_agent(
                     _record_master_error(master, action_error),
                 ))
 
-            _emit_progress(
-                on_progress,
-                "round_started",
-                {
-                    "round_number": round_number,
-                    "action_kind": action.kind,
-                    "task_count": len(action.tasks),
-                    "discovery_tasks": sum(not task.related_finding_ids for task in action.tasks),
-                    "cross_check_tasks": sum(bool(task.related_finding_ids) for task in action.tasks),
-                },
+        _emit_progress(
+            on_progress,
+            "round_started",
+            {
+                "round_number": round_number,
+                "action_kind": action.kind,
+                "task_count": len(action.tasks),
+                "discovery_tasks": sum(not task.related_finding_ids for task in action.tasks),
+                "cross_check_tasks": sum(bool(task.related_finding_ids) for task in action.tasks),
+            },
+        )
+        report = None
+        if wants_reading and wants_reflection:
+            # Both branches use the immutable pre-round snapshot; join before updating state.
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                worker_future = executor.submit(
+                    _run_worker_batch, worker, action.tasks, state, round_number, worker_parallelism
+                )
+                reflection_future = executor.submit(
+                    _run_reflection, reflector, state, "master_requested", finding_ids,
+                    round_number, on_progress, action,
+                )
+                results = worker_future.result()
+                report = reflection_future.result()
+        elif wants_reflection:
+            results = ()
+            report = _run_reflection(
+                reflector, state, "master_requested", finding_ids, round_number, on_progress, action,
             )
+        else:
             results = _run_worker_batch(
                 worker, action.tasks, state, round_number, worker_parallelism
             )
-            step = TraceStep(round_number, action, results)
-            state = AgentState(
-                findings=state.findings + results,
-                provisional_assessment=(
-                    action.assessment
-                    if isinstance(action.assessment, str) and action.assessment.strip()
-                    else state.provisional_assessment
+        if report is not None:
+            reflection_reports.append(report)
+        step = TraceStep(round_number, action, results)
+        state = AgentState(
+            findings=state.findings + results,
+            provisional_assessment=(
+                action.assessment
+                if isinstance(action.assessment, str) and action.assessment.strip()
+                else state.provisional_assessment
+            ),
+            unresolved_questions=action.unresolved_questions,
+            reflection_reports=tuple(reflection_reports),
+            steps=state.steps + (step,),
+            remaining_rounds=max_rounds - round_number,
+        )
+        _emit_progress(
+            on_progress,
+            "round_completed",
+            {
+                "round_number": round_number,
+                "action_kind": action.kind,
+                "task_count": len(action.tasks),
+                "discovery_tasks": sum(not task.related_finding_ids for task in action.tasks),
+                "cross_check_tasks": sum(bool(task.related_finding_ids) for task in action.tasks),
+                "successful_workers": sum(result.error is None for result in results),
+                "failed_workers": sum(result.error is not None for result in results),
+                "finding_count": sum(len(result.structured_findings) for result in results),
+                "evidence_item_count": sum(
+                    len(finding.evidence)
+                    for result in results
+                    for finding in result.structured_findings
                 ),
-                unresolved_questions=action.unresolved_questions,
-                reflection_reports=tuple(reflection_reports),
-                steps=state.steps + (step,),
-                remaining_rounds=max_rounds - round_number,
+                "suggested_question_count": sum(len(result.suggested_questions) for result in results),
+                "checklist_coverage": action.checklist_coverage or {},
+                "provisional_assessment_present": state.provisional_assessment is not None,
+                "unresolved_question_count": len(state.unresolved_questions),
+            },
+        )
+        if report is not None and report.error is not None:
+            return finish(_invalid_action_trace(
+                state.steps, f"reflection_error@round_{round_number}:{report.error}",
+            ))
+        if reflector is not None and not reflection_reports and max_reflections:
+            report = _run_reflection(
+                reflector, state, "post_method_model", _successful_finding_ids(state),
+                round_number, on_progress, None,
             )
-            _emit_progress(
-                on_progress,
-                "round_completed",
-                {
-                    "round_number": round_number,
-                    "action_kind": action.kind,
-                    "task_count": len(action.tasks),
-                    "discovery_tasks": sum(not task.related_finding_ids for task in action.tasks),
-                    "cross_check_tasks": sum(bool(task.related_finding_ids) for task in action.tasks),
-                    "successful_workers": sum(result.error is None for result in results),
-                    "failed_workers": sum(result.error is not None for result in results),
-                    "finding_count": sum(len(result.structured_findings) for result in results),
-                    "evidence_item_count": sum(
-                        len(finding.evidence)
-                        for result in results
-                        for finding in result.structured_findings
-                    ),
-                    "suggested_question_count": sum(len(result.suggested_questions) for result in results),
-                    "checklist_coverage": action.checklist_coverage or {},
-                    "provisional_assessment_present": state.provisional_assessment is not None,
-                    "unresolved_question_count": len(state.unresolved_questions),
-                },
-            )
-            if reflector is not None and not reflection_reports and max_reflections:
-                report = _run_reflection(
-                    reflector, state, "post_method_model", _successful_finding_ids(state),
-                    round_number, on_progress, None,
-                )
-                reflection_reports.append(report)
-                if report.error is not None:
-                    return finish(_invalid_action_trace(
-                        state.steps,
-                        f"reflection_error@round_{round_number}:{report.error}",
-                    ))
-                state = replace(state, reflection_reports=tuple(reflection_reports))
-            break
+            reflection_reports.append(report)
+            if report.error is not None:
+                return finish(_invalid_action_trace(
+                    state.steps,
+                    f"reflection_error@round_{round_number}:{report.error}",
+                ))
+            state = replace(state, reflection_reports=tuple(reflection_reports))
 
     return finish(_invalid_action_trace(state.steps, "round_budget_exhausted"))
 
@@ -545,6 +576,27 @@ def _emit_progress(
         callback(event, payload)
 
 
+def action_request_error(action: MasterAction) -> str | None:
+    """Validate action combinations before any Worker or Reflection is invoked."""
+    if action.kind not in {"READ_PAPER", "REFLECT", "READ_PAPER_AND_REFLECT", "DECIDE", "NEEDS_HUMAN"}:
+        return f"unsupported_action:{action.kind}"
+    wants_reflection = action.kind in {"REFLECT", "READ_PAPER_AND_REFLECT"}
+    if wants_reflection:
+        if _is_empty_string(action.reflection_focus):
+            return "reflection_focus_required"
+        if not isinstance(action.reflection_rubric_ids, tuple) or not 1 <= len(action.reflection_rubric_ids) <= 2:
+            return "reflection_rubric_ids_required"
+    elif action.reflection_focus is not None or action.reflection_rubric_ids or action.reflection_finding_ids:
+        return "reflection_requires_explicit_action"
+    if action.kind in {"REFLECT", "DECIDE", "NEEDS_HUMAN"} and action.tasks:
+        return "exclusive_action_with_reading_tasks"
+    if action.kind == "READ_PAPER_AND_REFLECT" and _is_empty_string(action.independence_rationale):
+        return "combined_action_requires_independence_rationale"
+    if action.kind != "READ_PAPER_AND_REFLECT" and action.independence_rationale:
+        return "independence_rationale_requires_combined_action"
+    return None
+
+
 def _read_action_error(action: MasterAction) -> str | None:
     if not isinstance(action.tasks, tuple):
         return f"read_paper_invalid_tasks_type:{type(action.tasks).__name__}"
@@ -648,6 +700,7 @@ def completed_finding_records(state: AgentState) -> tuple[ResearchContext, ...]:
                         evidence_locator=primary.locator,
                         decision_relevance="",
                         evidence_items=finding.evidence,
+                        task_rubric_ids=result.task.rubric_ids,
                     )
                 )
     return tuple(records)
