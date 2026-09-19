@@ -113,7 +113,7 @@ def test_rubric_with_no_matching_evidence_records_fallback() -> None:
     llm = _FakeLLM()
     reflector = PaperReflector(llm=llm, paper_name="paper", page_index="[]", overview_text="OVERVIEW",
         reflection_context_mode="rubric-union")
-    decision = replace(_focused_decision(), reflection_rubric_ids=("claim_boundary",),
+    decision = replace(_focused_decision(), reflection_rubric_ids=("stability_and_scope",),
         reflection_finding_ids=())
     report = reflector(_rubric_routed_state(), trigger="master_requested", finding_ids=(), proposed_decision=decision)
     assert report.context_mode == "full-history"
@@ -246,14 +246,20 @@ def test_reflector_uses_one_no_image_call_and_keeps_report_separate_from_evidenc
     assert "induced optimization target" in instructions
     assert "cheapest winning strategy" in instructions
     assert "actually observes" in instructions
-    assert "single most consequential issue" in instructions
+    assert "all distinct issues" in instructions
+    assert "single most consequential issue" not in instructions
+    assert "only the single smallest" not in instructions
     assert "declared search space" in instructions
     assert "observed accepted artifacts" in instructions
     assert "independently credited mechanisms" in instructions
     assert "Do not summarize Worker findings" in instructions
     assert "coherent prose memo" in instructions
     assert "bullet" in instructions
-    assert prompt["required_json_shape"] == {"reflection_memo": "coherent analysis for the Master"}
+    assert prompt["required_json_shape"] == {
+        "reflection_memo": "coherent analysis for the Master",
+        "rubric_notes": [runtime.entry_shape(runtime.DECISION_CHECKLIST, reflection=True)],
+    }
+    assert "rubric_content" not in prompt["state"]
     assert prompt["state"]["reflection_reports"] == []
     assert "coupled configuration" in report.reflection_memo
     assert recorder.records[0].role == "reflection"
@@ -293,18 +299,39 @@ def test_full_history_reflector_prompt_includes_the_requested_conclusion() -> No
         "reflection_focus": "Whether a coupled setting changes the conclusion.",
     }
     instructions = " ".join(prompt["instructions"])
-    assert "Analyze only proposed_decision.reflection_focus" in instructions
-    assert "Use only accumulated findings relevant to that named audit question" in instructions
+    assert "starting point, not a limit on issues" in instructions
+    assert "all distinct issues" in instructions
+    assert "Analyze only proposed_decision.reflection_focus" not in instructions
     assert "does not assert that a contradiction exists" in instructions
     assert "Evidence availability is not evidence of prior verification" in instructions
     assert "Think across the accumulated findings" not in instructions
-    assert "second global omission" in instructions
     assert "proposed decision stands" in instructions
-    assert "no material unchecked relationship remains within the focus" in instructions
+    assert "no material unchecked relationship remains in the supplied evidence" in instructions
     assert "Insufficient evidence to support a correction does not itself validate the conclusion" in instructions
     assert "do not recommend more reading" in instructions
     assert "conclusion at risk" in instructions
     assert "expected judgment delta" in instructions
+
+
+@pytest.mark.parametrize("trigger", ["post_method_model", "master_requested"])
+@pytest.mark.parametrize("context_mode", ["rubric-union", "full-history"])
+def test_every_reflection_requests_all_evaluation_relevant_issues_in_its_input(trigger, context_mode) -> None:
+    llm = _FakeLLM()
+    reflector = PaperReflector(llm=llm, paper_name="paper", page_index="[]", overview_text="Overview",
+        reflection_context_mode=context_mode)
+    reflector(_rubric_routed_state(), trigger=trigger, finding_ids=(),
+        proposed_decision=_focused_decision() if trigger == "master_requested" else None)
+    prompt = json.loads(llm.calls[0]["prompt"])
+    instructions = " ".join(prompt["instructions"])
+    assert "all distinct issues" in llm.calls[0]["system"]
+    assert "could affect the paper's evaluation" in instructions
+    assert "do not omit an issue merely because another is more consequential" in instructions
+    assert "relevant finding IDs" in instructions
+    assert "not evidence of absence" in instructions
+    assert "single most consequential issue" not in instructions
+    assert "Analyze only proposed_decision.reflection_focus" not in instructions
+    if trigger == "master_requested":
+        assert "starting point, not a limit on issues" in instructions
 
 
 def test_context_ownership_reflection_keeps_full_state_without_overview_or_index() -> None:

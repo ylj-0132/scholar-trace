@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "scholar-trace"
 version = "0.1.0"
-description = "Evidence-grounded paper evaluation agent research prototype"
+description = "Evidence-grounded paper reading and evaluation agent research prototype"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

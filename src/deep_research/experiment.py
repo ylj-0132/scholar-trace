@@ -7,20 +7,22 @@ import json
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import llm_api_base, llm_api_key, llm_request_timeout
-from .llm import LLMClient
-from .paper_agent_runtime import REFLECTION_CONTEXT_MODES, run_local_paper_agent
+from .llm import LLMClient, PROMPT_LAYOUT_VERSIONS
+from .paper_agent_runtime import PROMPT_LAYOUTS, REFLECTION_CONTEXT_MODES, run_local_paper_agent
 
 
 @dataclass(frozen=True)
 class AuditConfig:
     worker_parallelism: int = 2
     reflection_context_mode: str = "rubric-union"
+    prompt_layout: str = "standard"
 
 
 DEFAULT_AUDIT_CONFIG = AuditConfig()
@@ -33,14 +35,17 @@ ROLE_MODELS = {
     "synthesis": "openai/gpt-5.6-luna",
 }
 PROMPT_VERSIONS = {
-    "master": "master-v20-restored-convergence",
-    "locator": "locator-v7-rubric-routing",
-    "reflection": "reflection-v10-independent-request",
-    "evidence": "evidence-v10-rubric-scope",
-    "synthesis": "synthesis-v11-rubric-reconciliation",
+    "master": "master-v30-complementary-evidence",
+    "locator": "locator-v9-reading-rubric",
+    "reflection": "reflection-v15-unconfirmed-scope",
+    "evidence": "evidence-v18-traceable-context",
+    "synthesis": "synthesis-v17-advisory-details",
 }
 INVESTIGATION_TARGET = (
-    "Audit the paper's own research problem, claimed contributions, mechanisms and "
+    "Explain the whole paper method to another reader: problem and inputs/outputs, "
+    "core idea and motivation, representations and module roles, complete workflow, "
+    "essential details and operating conditions, and a grounded worked example or an "
+    "explicit gap. Alongside this explanation, audit the paper's own research problem, claimed contributions, mechanisms and "
     "experimental evidence. Reconstruct the information flow, component roles, runtime "
     "access paths, operational bounds and costs relevant to those claims. Determine which claims are "
     "directly supported by the method, appendices, ablations, and held-out experiments; "
@@ -80,6 +85,8 @@ def run_audit(
         return 1
     if config.reflection_context_mode not in REFLECTION_CONTEXT_MODES:
         return 1
+    if config.prompt_layout not in PROMPT_LAYOUTS:
+        return 1
 
     try:
         output_dir.mkdir(parents=True, exist_ok=False)
@@ -92,7 +99,9 @@ def run_audit(
         manifest = _manifest(paper_path, config)
         _write_new_json(output_dir / "manifest.json", manifest)
         _write_json(output_dir / "progress.json", _progress("running"))
+        started = time.perf_counter()
         trace = run_local_paper_agent(
+            require_method_review=True,
             pdf_path=paper_path,
             llm=role_llms["master"],
             role_llms=role_llms,
@@ -100,17 +109,20 @@ def run_audit(
             worker_parallelism=config.worker_parallelism,
             max_reflections=2,
             reflection_context_mode=config.reflection_context_mode,
+            prompt_layout=config.prompt_layout,
             worker_context_mode="selected-context",
             worker_role_mode="legacy",
-            master_context_mode="incremental-no-raw-evidence",
+            master_context_mode="incremental-with-evidence",
             paper_context_mode="master-overview-history-only",
             investigation_target=INVESTIGATION_TARGET,
         )
+        wall_seconds = time.perf_counter() - started
         trace_payload = json.loads(trace.to_json())
         result = {
             "status": "completed",
             "judgment_status": _judgment_status(trace),
             "paper": paper_path.name,
+            "wall_seconds": wall_seconds,
             "trace": trace_payload,
         }
         sanitized_result, serialization_warnings = _sanitize_audit_payload(
@@ -170,11 +182,18 @@ def _manifest(paper_path: Path, config: AuditConfig) -> dict[str, object]:
         "action_policy": "read-reflect-independent-batch-v1",
         "investigation_target": INVESTIGATION_TARGET,
         "reflection_context_mode": config.reflection_context_mode,
-        "finding_provenance": "worker-id-dispositions-v1",
+        "prompt_layout": config.prompt_layout,
+        "prompt_layout_version": PROMPT_LAYOUT_VERSIONS[config.prompt_layout],
+        "finding_provenance": "worker-id-method-and-judgment-v2",
+        "rubric_version": "paper-reading-12-v1",
+        "rubric_content_version": "rubric-content-v3-advisory",
+        "method_review_policy": "required-before-decide-v1",
+        "detail_retention_policy": "persistent-details-human-advisory-v2",
+        "report_contract": "method-understanding-and-judgment-v1",
         "worker_parallelism": config.worker_parallelism,
         "worker_context_mode": "selected-context",
         "worker_role_mode": "legacy",
-        "master_context_mode": "incremental-no-raw-evidence",
+        "master_context_mode": "incremental-with-evidence",
         "paper_context_mode": "master-overview-history-only",
         "source_sha256": {
             relative_path: _sha256(path)
@@ -271,6 +290,9 @@ def _reproducibility_sources() -> dict[str, Path]:
         "src/deep_research/experiment.py": package_dir / "experiment.py",
         "src/deep_research/paper_agent_runtime.py": package_dir / "paper_agent_runtime.py",
         "src/deep_research/paper_agent.py": package_dir / "paper_agent.py",
+        "src/deep_research/paper_understanding.py": package_dir / "paper_understanding.py",
+        "src/deep_research/rubric_content.py": package_dir / "rubric_content.py",
+        "src/deep_research/rubric_details.py": package_dir / "rubric_details.py",
         "src/deep_research/paper_reading.py": package_dir / "paper_reading.py",
         "src/deep_research/llm.py": package_dir / "llm.py",
         "src/deep_research/config.py": package_dir / "config.py",

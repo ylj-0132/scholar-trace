@@ -1,6 +1,6 @@
 # HarnessBank 三版本过程对照记录
 
-本文可公开阅读；下文 `data/audits/` 链接指向保留在本地开发工作区的原始证据，不随 GitHub 仓库发布。原始数据缺席公开仓库不改变本记录的单例结论边界。
+本文记录 2026 年 9 月 6—7 日的实验。先看四组 Reflection 对照与三组完整运行汇总；恢复和启动过程在下方折叠保留。`data/audits/` 路径是本地原始记录的名称，不随 GitHub 仓库发布。当前论文阅读机制见 [阅读契约](PAPER_READING.md)。
 
 ## 2026-09-07 正式化状态与历史边界
 
@@ -17,12 +17,17 @@
 | 旧路由（相同两条加标签/索引） | 2 | 2,222 | 2,671 |
 | v20 Rubric 并集加锚点 | 18 | 11,141 | 12,191 |
 
-完整入口：[复盘](../data/audits/harnessbank-reflection-ablation-20260907-01/review.md)、[原始清单](../data/audits/harnessbank-reflection-ablation-20260907-01/manifest.json)、[共同源状态](../data/audits/harnessbank-reflection-ablation-20260907-01/source_state.json)。各组实际发送输入与输出：
+<details>
+<summary>本地原始记录名称（未随仓库发布）</summary>
 
-- 全历史：[prompt](../data/audits/harnessbank-reflection-ablation-20260907-01/full-history/prompt.json)、[result](../data/audits/harnessbank-reflection-ablation-20260907-01/full-history/result.json)
-- 聚焦：[prompt](../data/audits/harnessbank-reflection-ablation-20260907-01/rubric-focused/prompt.json)、[result](../data/audits/harnessbank-reflection-ablation-20260907-01/rubric-focused/result.json)
-- 路由：[prompt](../data/audits/harnessbank-reflection-ablation-20260907-01/rubric-routing/prompt.json)、[result](../data/audits/harnessbank-reflection-ablation-20260907-01/rubric-routing/result.json)
-- v20：[prompt](../data/audits/harnessbank-reflection-ablation-20260907-01/current-v20/prompt.json)、[result](../data/audits/harnessbank-reflection-ablation-20260907-01/current-v20/result.json)
+完整入口：复盘 (`data/audits/harnessbank-reflection-ablation-20260907-01/review.md`)、原始清单 (`data/audits/harnessbank-reflection-ablation-20260907-01/manifest.json`)、共同源状态 (`data/audits/harnessbank-reflection-ablation-20260907-01/source_state.json`)。各组实际发送输入与输出：
+
+- 全历史：prompt (`data/audits/harnessbank-reflection-ablation-20260907-01/full-history/prompt.json`)、result (`data/audits/harnessbank-reflection-ablation-20260907-01/full-history/result.json`)
+- 聚焦：prompt (`data/audits/harnessbank-reflection-ablation-20260907-01/rubric-focused/prompt.json`)、result (`data/audits/harnessbank-reflection-ablation-20260907-01/rubric-focused/result.json`)
+- 路由：prompt (`data/audits/harnessbank-reflection-ablation-20260907-01/rubric-routing/prompt.json`)、result (`data/audits/harnessbank-reflection-ablation-20260907-01/rubric-routing/result.json`)
+- v20：prompt (`data/audits/harnessbank-reflection-ablation-20260907-01/current-v20/prompt.json`)、result (`data/audits/harnessbank-reflection-ablation-20260907-01/current-v20/result.json`)
+
+</details>
 
 本例 v20 比全历史少 **46.48% 总 Tokens**，保留主要判断，并更完整地利用了 K=1 候选选择与 K=3 最终评估的限定。该限定本来就在 Worker finding `r1-t3-f4` 中，不是 Reflection 新发现的论文事实。全历史同样表现良好、没有明显偏题；小切片也能保留核心限定，但无法利用未提供的其他证据。本例支持的是上下文效率取舍，不支持稳定显著的能力提升、全面领先或整个 Agent 的性能增益。所选案例及锚点有目的性，四组各一次，未测 Master 是否会自然选择这些 Rubric，也未测对最终综合的影响。
 
@@ -48,7 +53,12 @@ v20 后续 Master payload 明示 reflection_budget.remaining=1、request_availab
 
 墙钟分别 406.253、511.487、651.616 秒；请求尝试分别 22、19、20 次，均含服务连接重试。并行等待及慢响应明显影响耗时，不能据此直接排列架构速度。聚焦版另有失败 01：返回 usage 2,548 Tokens，102.932 秒，不含失败请求未知计费。
 
-逐轮任务、读页、信息流、重复成本和来源问题详见：[聚焦版复盘](../data/audits/harnessbank-20260906-focused-reconstructed-02/review.md)、[路由版复盘](../data/audits/harnessbank-20260906-routing-reconstructed-01/review.md)、[v20 复盘](../data/audits/harnessbank-20260906-current-v20-01/review.md)。以下内容保留为准备和运行过程的时间顺序记录。
+逐轮任务、读页、信息流、重复成本和来源问题详见：聚焦版复盘 (`data/audits/harnessbank-20260906-focused-reconstructed-02/review.md`)、路由版复盘 (`data/audits/harnessbank-20260906-routing-reconstructed-01/review.md`)、v20 复盘 (`data/audits/harnessbank-20260906-current-v20-01/review.md`)。以下内容保留为准备和运行过程的时间顺序记录。
+
+<details>
+<summary>展开历史过程：2026 年 9 月 6—7 日的恢复、预检与启动记录</summary>
+
+以下“当前”“尚未”“待执行”均指记录当时的阶段，不表示现在仍待运行或仍支持旧实现。实验最终结论以文首汇总为准。
 
 ## 历史进展：独立恢复与逐组启动
 
@@ -139,6 +149,8 @@ v20 后续 Master payload 明示 reflection_budget.remaining=1、request_availab
 当前版：路由版完成后立即启动 01，现已正常 DECIDE，18 次调用、191,163 Tokens、651.616 秒，运行后冻结校验通过。一条来源警告 unlinked_disposition:r1-t2-f6。结果目录为 data/audits/harnessbank-20260906-current-v20-01，详细 review.md 已完成。
 
 横向结论：三组均完成，见文首最终汇总；原版取消，未追加实验。
+
+</details>
 
 ## 人工原文核验基线（不注入模型）
 

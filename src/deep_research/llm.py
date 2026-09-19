@@ -9,6 +9,33 @@ from typing import Any, Sequence
 
 log = logging.getLogger(__name__)
 
+PROMPT_LAYOUT_VERSIONS = {
+    "standard": "field-order-v1",
+    "cache-friendly": "explicit-breakpoints-v3",
+}
+
+
+def cache_friendly_prompt_parts(prompt: str) -> tuple[str, str]:
+    """Return a reusable JSON prefix and dynamic suffix; concatenation is valid JSON."""
+    payload = json.loads(prompt)
+    if not isinstance(payload, dict):
+        return "", prompt
+    stable_fields = (
+        "mechanism_audit_principles", "decision_checklist", "output_contract",
+        "required_json_shape", "instructions", "investigation_target", "paper",
+        "compact_page_index", "available_pages",
+    )
+    prefix = {key: payload[key] for key in stable_fields if key in payload}
+    ordered = json.dumps({**prefix, **payload}, ensure_ascii=False, indent=2)
+    if not prefix:
+        return "", ordered
+    if len(prefix) == len(payload):
+        return ordered, ""
+    # Exclude the closing newline/brace; the comma and dynamic fields stay outside
+    # the breakpoint. Do not search field names inside arbitrary evidence text.
+    boundary = len(json.dumps(prefix, ensure_ascii=False, indent=2)) - 2
+    return ordered[:boundary], ordered[boundary:]
+
 
 class LLMClient:
     def __init__(
@@ -45,6 +72,7 @@ class LLMClient:
             system=system,
             temperature=temperature,
             image_urls=image_urls,
+            cache_friendly=getattr(recorder, "prompt_layout", "standard") == "cache-friendly",
         )
         selected_temperature = self.temperature if temperature is None else temperature
         last_exc: Exception | None = None
@@ -153,18 +181,35 @@ class LLMClient:
         system: str | None,
         temperature: float | None,
         image_urls: Sequence[str] | None = None,
+        cache_friendly: bool = False,
     ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
-        if image_urls:
-            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if cache_friendly or image_urls:
+            content: list[dict[str, Any]] = []
+            if cache_friendly:
+                prefix, suffix = cache_friendly_prompt_parts(prompt)
+                if system:
+                    messages[0]["content"] = [{
+                        "type": "text", "text": system,
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    }]
+                if prefix:
+                    content.append({
+                        "type": "text", "text": prefix,
+                        "prompt_cache_breakpoint": {"mode": "explicit"},
+                    })
+                if suffix:
+                    content.append({"type": "text", "text": suffix})
+            else:
+                content.append({"type": "text", "text": prompt})
             content.extend(
                 {
                     "type": "image_url",
                     "image_url": {"url": image_url, "detail": "high"},
                 }
-                for image_url in image_urls
+                for image_url in (image_urls or ())
             )
             messages.append({"role": "user", "content": content})
         else:
@@ -177,6 +222,10 @@ class LLMClient:
             "max_retries": 0,
             "num_retries": 0,
         }
+        if cache_friendly:
+            # Pass through to the OpenAI-compatible HTTP body, including when
+            # LiteLLM's model parameter allowlist predates explicit caching.
+            kwargs["extra_body"] = {"prompt_cache_options": {"mode": "explicit"}}
         selected_temperature = self.temperature if temperature is None else temperature
         if selected_temperature is not None:
             kwargs["temperature"] = selected_temperature
@@ -259,6 +308,8 @@ def _record_call_completion(
             prompt_tokens=_usage_value(response, "prompt_tokens"),
             completion_tokens=_usage_value(response, "completion_tokens"),
             total_tokens=_usage_value(response, "total_tokens"),
+            cached_prompt_tokens=_usage_value(response, "prompt_tokens_details", "cached_tokens"),
+            cache_write_prompt_tokens=_usage_value(response, "prompt_tokens_details", "cache_write_tokens"),
             model=model,
             temperature=temperature,
         )
@@ -288,14 +339,11 @@ def _record_call_error(
         )
 
 
-def _usage_value(response: Any, name: str) -> int | None:
-    usage = getattr(response, "usage", None)
-    if usage is None and isinstance(response, dict):
-        usage = response.get("usage")
-    if usage is None:
-        return None
-    value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+def _usage_value(response: Any, *path: str) -> int | None:
+    value = response
+    for name in ("usage", *path):
+        value = value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _redact_secret(text: str, secret: str | None) -> str:

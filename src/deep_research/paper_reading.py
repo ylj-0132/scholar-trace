@@ -233,6 +233,50 @@ def section_kind_for_heading(heading: str) -> str | None:
     return None
 
 
+def page_navigation_markers(text: str) -> tuple[list[str], list[str]]:
+    """Bounded heuristic labels from the whole page, not evidence classification."""
+    heading = re.compile(
+        r"^(?:(?:[1-9]\d*(?:\.\d+)*|[A-Z](?:\.\d+)*|[IVXLCDM]+)\.?\s+"
+        r"|Appendix\s+[A-Z0-9]+[.:]?\s+)[A-Za-z]{3,}\b"
+    )
+    caption = re.compile(r"^(?:figure|fig\.?|table)\s+(?:[A-Z]\.?)?\d+(?:\.\d+)*\b", re.IGNORECASE)
+    label_only = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Z](?:\.\d+)*|Appendix(?:\s+[A-Z0-9]+)?)\.?$")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    headings, captions = [], []
+    for i, line in enumerate(lines):
+        if label_only.fullmatch(line) and i + 1 < len(lines):
+            line += " " + lines[i + 1]
+        if caption.match(line):
+            captions.append(line[:240])
+        elif len(line) <= 160 and (heading.match(line) or section_kind_for_heading(line)):
+            headings.append(line)
+    return list(dict.fromkeys(headings))[:12], list(dict.fromkeys(captions))[:12]
+
+
+def question_navigation_snippets(pages: Sequence[PaperPage], question: str) -> list[dict[str, object]]:
+    """At most six lexical page hints of 240 characters; never a completeness claim."""
+    stopwords = {"what", "which", "where", "when", "does", "have", "with", "from", "that", "this",
+                 "paper", "report", "reported", "reports", "whether", "their", "there", "these",
+                 "supplied", "evidence", "explicitly", "would", "could", "about", "into", "only"}
+    terms = set(re.findall(r"[a-z][a-z0-9-]{3,}", question.lower())) - stopwords
+    if not terms:
+        return []
+    pattern = re.compile(r"\b(?:" + "|".join(re.escape(t) for t in sorted(terms)) + r")\b", re.IGNORECASE)
+    candidates = []
+    for page in pages:
+        best = None
+        for match in pattern.finditer(page.text):
+            start = max(0, match.start() - 60)
+            snippet = page.text[start:start + 240]
+            score = len({m.group().lower() for m in pattern.finditer(snippet)})
+            if best is None or score > best[0]:
+                best = (score, snippet)
+        if best is not None:
+            candidates.append((best[0], page.page_number, best[1]))
+    selected = sorted(candidates, key=lambda item: (-item[0], item[1]))[:6]
+    return [{"page_number": page, "text": snippet} for _, page, snippet in sorted(selected, key=lambda item: item[1])]
+
+
 def normalize_text(text: str) -> str:
     text = text.replace("\x00", "")
     text = re.sub(r"[\x01-\x08\x0b-\x0c\x0e-\x1f\x7f]", " ", text)

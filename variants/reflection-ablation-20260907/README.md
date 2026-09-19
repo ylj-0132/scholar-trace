@@ -32,7 +32,7 @@ during formalization. Offline tests use synthetic source state and fake clients:
 ## Historical four-group experiment
 
 The immutable results remain at
-[`data/audits/harnessbank-reflection-ablation-20260907-01`](../../data/audits/harnessbank-reflection-ablation-20260907-01/review.md).
+data/audits/harnessbank-reflection-ablation-20260907-01 (`data/audits/harnessbank-reflection-ablation-20260907-01/review.md`).
 The v1 manifest records the script and prompts actually used then. That script
 has now been adjusted; its old hash has not been rewritten, and it is not
 retained as a hidden runnable backup. The current script cannot byte-reproduce
@@ -44,6 +44,12 @@ four-group control, full history retains task routing labels and the native
 union prompt retains its slice-specific instructions. New results are a
 comparison of the supported policies, not the same controlled four-group
 experiment. Their context metadata records the actual supplied findings.
+
+The active runtime now asks both modes to report all distinct evaluation-relevant
+issues visible in their input; the requested focus is a starting point rather
+than an exclusive topic boundary. The historical four-group prompts used the
+earlier duties and remain unchanged. Their results do not measure this prompt
+revision; new preparations freeze the current runtime and generated prompts.
 
 The old four runs used the same modern v20 duties, each succeeded once, and did
 not continue the audit. v20 saved 46.48% total tokens versus full history in that

@@ -1,4 +1,13 @@
-# v20 formalization and cleanup ? 2026-09-07
+# v20 formalization and cleanup — 2026-09-07
+
+This dated record explains the migration to `rubric-union` and retirement of
+the two anchor-only implementations. Current behavior is documented in
+[Architecture](ARCHITECTURE.md) and the [reading contract](PAPER_READING.md).
+The detailed cleanup inventory below is retained for historical traceability;
+test counts and publication status describe September 7, 2026.
+
+<details>
+<summary>Historical cleanup: deletion inventory, preserved material and recovery limits</summary>
 
 ## Pre-change evidence
 
@@ -116,6 +125,8 @@ All data/audits records and the current-v20 frozen directory are protected by a 
 
 The removed reconstructions were untracked at handoff. Their manifests/hashes cannot restore their source bytes, and the current Git history is not a confirmed recovery source. Actual sent prompts, outputs, events, failure/retry records and reconstruction notes remain available for historical audit. Frozen current-v20 remains a source reference for v20, not a backup of the retired mechanisms. The old runner and ablation-script hashes remain historical identifiers; the modified script cannot byte-reproduce the old four-group experiment.
 
+
+</details>
 
 ## Completed changes
 

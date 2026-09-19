@@ -46,7 +46,7 @@ def rubric_state():
         )
         for i, (label, keys) in enumerate([
             ("MISSING_INPUT", ("core_contribution",)),
-            ("TEMPLATE_PRESENT", ("core_contribution", "claim_boundary")),
+            ("TEMPLATE_PRESENT", ("core_contribution", "stability_and_scope")),
             ("UNRELATED_COST", ("matched_resource_efficiency",)),
             ("LEGACY_UNASSIGNED", ()),
         ], 1)
@@ -57,16 +57,16 @@ def rubric_state():
 
 
 def test_task_rubric_labels_roundtrip_and_legacy_default():
-    action = runtime.parse_master_action(read_payload(rubric_ids=["core_contribution", "claim_boundary"]))
-    assert action.tasks[0].rubric_ids == ("core_contribution", "claim_boundary")
+    action = runtime.parse_master_action(read_payload(rubric_ids=["core_contribution", "stability_and_scope"]))
+    assert action.tasks[0].rubric_ids == ("core_contribution", "stability_and_scope")
     assert runtime.parse_master_action(read_payload()).tasks[0].rubric_ids == ()
     trace = AgentTrace((TraceStep(1, action),), "DECIDE", "bounded", "done")
-    assert json.loads(trace.to_json())["steps"][0]["action"]["tasks"][0]["rubric_ids"] == ["core_contribution", "claim_boundary"]
+    assert json.loads(trace.to_json())["steps"][0]["action"]["tasks"][0]["rubric_ids"] == ["core_contribution", "stability_and_scope"]
 
 
 @pytest.mark.parametrize("value", ["core_contribution", None, [2], ["unknown"],
     ["core_contribution", "core_contribution"], [""],
-    ["core_contribution", "claim_boundary", "main_evidence"]])
+    ["core_contribution", "stability_and_scope", "main_evidence"]])
 def test_invalid_task_rubric_labels_are_rejected(value):
     with pytest.raises(ValueError, match="rubric_ids"):
         runtime.parse_master_action(read_payload(rubric_ids=value))
@@ -77,7 +77,7 @@ def test_rubric_index_routes_ids_without_copying_evidence_or_hiding_legacy_findi
     expected = {
         "by_rubric": {
             "core_contribution": ["r1-t1-f1", "r1-t2-f1"],
-            "claim_boundary": ["r1-t2-f1"],
+            "stability_and_scope": ["r1-t2-f1"],
             "matched_resource_efficiency": ["r1-t3-f1"],
         },
         "unassigned_finding_ids": ["r1-t4-f1"],
@@ -86,12 +86,12 @@ def test_rubric_index_routes_ids_without_copying_evidence_or_hiding_legacy_findi
         payload = build(state)
         assert payload["rubric_context_index"] == expected
         assert len(payload["findings"]) == 4
-        assert payload["findings"][1]["task_rubric_ids"] == ["core_contribution", "claim_boundary"]
+        assert payload["findings"][1]["task_rubric_ids"] == ["core_contribution", "stability_and_scope"]
         assert "QUOTE_" not in json.dumps(payload["rubric_context_index"])
     compact = json.dumps(runtime._master_state_payload(state))
-    assert "QUOTE_" not in compact and "CAVEAT_TEMPLATE_PRESENT" in compact
+    assert "QUOTE_TEMPLATE_PRESENT" in compact and "CAVEAT_TEMPLATE_PRESENT" in compact
     records = completed_finding_records(state)
-    assert records[1].task_rubric_ids == ("core_contribution", "claim_boundary")
+    assert records[1].task_rubric_ids == ("core_contribution", "stability_and_scope")
     selected, diagnostics = _selected_research_context(state, EvidenceTask(
         "Check a cross-dimension relationship", related_finding_ids=("r1-t2-f1",),
         rubric_ids=("matched_resource_efficiency",),
@@ -119,7 +119,7 @@ def test_actual_worker_calls_receive_only_assigned_rubric_guidance():
 
 
 @pytest.mark.parametrize("keys", [("unknown",), ("core_contribution", "core_contribution"),
-    ("core_contribution", "claim_boundary", "main_evidence"), "core_contribution"])
+    ("core_contribution", "stability_and_scope", "main_evidence"), "core_contribution"])
 def test_programmatic_worker_rejects_bad_rubric_before_any_model_call(keys):
     llm = ResponseLLM()
     worker = runtime.PaperEvidenceWorker(pdf_path=Path("not-opened.pdf"), pages=[], page_index="[]", llm=llm)
@@ -128,7 +128,7 @@ def test_programmatic_worker_rejects_bad_rubric_before_any_model_call(keys):
     assert llm.prompts == []
 
 
-def test_focused_reflection_indexes_only_visible_slice_and_preserves_old_mechanism_prompt():
+def test_union_reflection_indexes_visible_slice_without_restricting_issues_to_focus():
     llm = ResponseLLM({"reflection_memo": "Compare the two reports before concluding absence."})
     reflector = runtime.PaperReflector(llm=llm, paper_name="paper", page_index="[]", overview_text="NO_FULL_TEXT",
         reflection_context_mode="rubric-union")
@@ -139,26 +139,28 @@ def test_focused_reflection_indexes_only_visible_slice_and_preserves_old_mechani
     prompt = llm.prompts[0]
     assert report.context_finding_ids == ("r1-t1-f1", "r1-t2-f1")
     assert prompt["state"]["rubric_context_index"]["by_rubric"] == {
-        "core_contribution": ["r1-t1-f1", "r1-t2-f1"], "claim_boundary": ["r1-t2-f1"],
+        "core_contribution": ["r1-t1-f1", "r1-t2-f1"], "stability_and_scope": ["r1-t2-f1"],
     }
     assert "UNRELATED_COST" not in json.dumps(prompt) and "LEGACY_UNASSIGNED" not in json.dumps(prompt)
     instructions = " ".join(prompt["instructions"])
     assert "cross-Worker" in instructions and "not evidence of absence" in instructions
-    assert "Analyze only proposed_decision.reflection_focus" in instructions
+    assert "starting point, not a limit on issues" in instructions
+    assert "all distinct issues" in instructions
     assert "expected judgment delta" in instructions
 
 
 def test_master_and_synthesis_use_rubric_index_for_relationships_not_scoring():
     llm = ResponseLLM({"kind": "NEEDS_HUMAN"})
     master = runtime.PaperAgentMaster(llm=llm, paper_name="paper", page_index="[]", overview_text="OVERVIEW",
-        overview_images=(), master_context_mode="incremental-no-raw-evidence")
+        overview_images=(), master_context_mode="incremental-with-evidence")
     master(rubric_state())
     prompt = llm.prompts[0]
     assert "rubric_context_index" in prompt["state"]
     assert "rubric_ids" in prompt["output_contract"]["READ_PAPER"]["tasks"][0]
     instructions = " ".join(prompt["instructions"])
     assert "cross-Worker" in instructions and "routing hints" in instructions
-    assert "one named unresolved mechanism conflict" in instructions
+    assert "not a limit on the issues the Reflector may report" in instructions
+    assert "each distinct issue in the Reflection memo" in instructions
     assert "reading value and verification value separately" in instructions
     assert "No new findings or already-identified contradiction is required" in instructions
     assert "When skipping Reflection, explain" in instructions

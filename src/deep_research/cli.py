@@ -20,6 +20,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config=AuditConfig(
             worker_parallelism=args.worker_parallelism,
             reflection_context_mode=args.reflection_context,
+            prompt_layout=args.prompt_layout,
         ),
     )
 
@@ -42,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("full-history", "rubric-union"),
         default="rubric-union",
         help="Context for the optional second Reflection (default: rubric-union)",
+    )
+    audit.add_argument(
+        "--prompt-layout",
+        choices=("standard", "cache-friendly"),
+        default="standard",
+        help="Standard requests or explicit cache parameters and prefix breakpoints (default: standard)",
     )
     external_audit = subparsers.add_parser(
         "external-audit", help="Audit external evidence after a completed paper-only result"

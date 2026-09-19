@@ -12,6 +12,11 @@ data/
 paper/
 local_archive/
 
+# Interview showcase and machine-specific experiment launcher stay local.
+/showcase/
+/start.cmd
+/scripts/run_reme_worker_context.py
+
 # Local planning notes and frozen experiment copies; public runners stay tracked.
 docs/superpowers/
 variants/harnessbank-20260906/current-v20/

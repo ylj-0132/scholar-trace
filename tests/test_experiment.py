@@ -116,12 +116,13 @@ def test_run_audit_fake_execution_writes_safe_create_once_outputs(
 
     assert experiment.run_audit(_pdf(tmp_path / "paper.pdf"), output_dir) == 0
     assert constructed == list(experiment.ROLE_MODELS.values())
+    assert captured["require_method_review"] is True
     assert captured["max_rounds"] == 5
     assert captured["max_reflections"] == 2
     assert captured["reflection_context_mode"] == "rubric-union"
     assert captured["worker_parallelism"] == 2
     assert captured["worker_context_mode"] == "selected-context"
-    assert captured["master_context_mode"] == "incremental-no-raw-evidence"
+    assert captured["master_context_mode"] == "incremental-with-evidence"
     assert captured["paper_context_mode"] == "master-overview-history-only"
     assert captured["worker_role_mode"] == "legacy"
     assert set(captured["role_llms"]) == set(experiment.ROLE_MODELS)
@@ -130,20 +131,31 @@ def test_run_audit_fake_execution_writes_safe_create_once_outputs(
     result = json.loads((output_dir / "result.json").read_text(encoding="utf-8"))
     progress = json.loads((output_dir / "progress.json").read_text(encoding="utf-8"))
     assert manifest["role_models"] == experiment.ROLE_MODELS
-    assert manifest["prompt_versions"]["master"] == "master-v20-restored-convergence"
-    assert manifest["prompt_versions"]["reflection"] == "reflection-v10-independent-request"
+    assert manifest["prompt_versions"]["master"] == "master-v30-complementary-evidence"
+    assert manifest["prompt_versions"]["locator"] == "locator-v9-reading-rubric"
+    assert manifest["prompt_versions"]["evidence"] == "evidence-v18-traceable-context"
+    assert manifest["prompt_versions"]["reflection"] == "reflection-v15-unconfirmed-scope"
     assert manifest["investigation_target"] == captured["investigation_target"] == experiment.INVESTIGATION_TARGET
     assert manifest["reflection_policy"] == "post-method-model-and-master-requested"
     assert manifest["action_policy"] == "read-reflect-independent-batch-v1"
-    assert manifest["prompt_versions"]["synthesis"] == "synthesis-v11-rubric-reconciliation"
+    assert manifest["prompt_versions"]["synthesis"] == "synthesis-v17-advisory-details"
     assert manifest["reflection_context_mode"] == "rubric-union"
-    assert manifest["finding_provenance"] == "worker-id-dispositions-v1"
+    assert manifest["master_context_mode"] == captured["master_context_mode"] == "incremental-with-evidence"
+    assert manifest["finding_provenance"] == "worker-id-method-and-judgment-v2"
+    assert manifest["rubric_version"] == "paper-reading-12-v1"
+    assert manifest["rubric_content_version"] == "rubric-content-v3-advisory"
+    assert manifest["detail_retention_policy"] == "persistent-details-human-advisory-v2"
+    assert manifest["method_review_policy"] == "required-before-decide-v1"
+    assert manifest["report_contract"] == "method-understanding-and-judgment-v1"
     assert "synthesis_comparison_attribution_revision" not in manifest
     assert manifest["paper_sha256"] == experiment._sha256(tmp_path / "paper.pdf")
     assert {
         "src/deep_research/experiment.py",
         "src/deep_research/paper_agent_runtime.py",
         "src/deep_research/paper_agent.py",
+        "src/deep_research/paper_understanding.py",
+        "src/deep_research/rubric_content.py",
+        "src/deep_research/rubric_details.py",
     } <= set(manifest["source_sha256"])
     assert manifest["status"] == "completed"
     assert result["status"] == "completed"

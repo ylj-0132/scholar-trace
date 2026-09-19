@@ -316,7 +316,10 @@ def test_evidence_worker_uses_one_locator_and_one_multimodal_evidence_call(
     assert len(llm.calls) == 2
     assert llm.calls[0]["image_urls"] is None
     assert json.loads(llm.calls[0]["prompt"])["image_inputs"] == []
-    assert "TARGET_PAGE_TEXT_NOT_IN_INDEX" not in llm.calls[0]["prompt"]
+    locator_prompt = json.loads(llm.calls[0]["prompt"])
+    assert "TARGET_PAGE_TEXT_NOT_IN_INDEX" not in json.dumps(locator_prompt["compact_page_index"])
+    assert len(locator_prompt.get("navigation_snippets", [])) <= 6
+    assert all(len(item["text"]) <= 240 for item in locator_prompt.get("navigation_snippets", []))
     assert "Selected evidence: the ablation removes the planner." in llm.calls[1]["prompt"]
     assert llm.calls[1]["image_urls"] == [
         "data:image/png;base64,page-2",
@@ -374,6 +377,8 @@ def test_master_prompt_declares_all_action_json_contracts() -> None:
     assert "distinct finding, caveat, experimental boundary, counterexample, or reporting inconsistency" in contract["READ_PAPER"]["expected_judgment_delta"]
     assert "at least one plausible answer" not in contract["READ_PAPER"]["expected_judgment_delta"]
     assert contract["DECIDE"] == {
+        "method_review": runtime.method_review_shape(),
+        "detail_updates": [runtime.detail_update_shape()],
         "kind": "DECIDE",
         "tasks": [],
         "unresolved_questions": [
@@ -386,28 +391,33 @@ def test_master_prompt_declares_all_action_json_contracts() -> None:
             for key in runtime.DECISION_CHECKLIST
         },
         "stop_reason_code": "evidence_sufficient|paper_saturated|remaining_gaps_unreported|remaining_gaps_external",
+        "rubric_updates": [runtime.entry_shape(runtime.DECISION_CHECKLIST)],
+        "rubric_links": [{
+            "finding_id": "r1-t1-f1", "rubric_ids": ["method_workflow"],
+            "reason": "why this finding belongs under these content dimensions instead of its previous associations",
+        }],
     }
     assert contract["NEEDS_HUMAN"]["assessment"] is None
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "at most two" not in instructions
     assert "necessary for a complete, evidence-supported paper judgment" in instructions
     assert "conclusion at risk" in instructions
     assert "missing paper evidence" in instructions
     assert "expected judgment delta" in instructions
     assert "Budget remaining is not evidence value" in instructions
-    assert "Do not continue because rounds remain; DECIDE once the accumulated evidence supports the paper judgment" in instructions
-    assert "every remaining gap is non-blocking, already paper-unreported, answerable only by code or external evidence, or unlikely to change the assessment" in instructions
+    assert "Do not continue because rounds remain; DECIDE once the accumulated evidence supports the method explanation and paper judgment" in instructions
+    assert "every remaining gap is non-blocking, already paper-unreported, answerable only by code or external evidence, or unlikely to improve either outcome" in instructions
     assert "paper-unreported" in instructions
     assert "preserve it as unresolved and do not reopen it through another section, paraphrase, locator query, or Worker task unless new locator evidence identifies a specific unexamined source" in instructions
     assert "At every turn assess reading value and verification value separately" in instructions
     assert "reviewing whether the existing evidence justified calling the detail unreported" in instructions
-    assert "general completeness check" in instructions
+    assert "Request review for a concrete understanding or evaluation purpose" in instructions
     assert "Every task in a multi-task READ_PAPER action must add a distinct, non-duplicate evidence direction" in instructions
     assert "the paper could resolve it" in instructions
     assert "A stable overall assessment is not sufficient reason to stop" in instructions
     assert "need not change the overall positive or negative assessment" in instructions
     assert "one independent direction not originating in Reflection" in instructions
-    assert "materially qualify or correct the conclusion" in instructions
+    assert "qualify or correct the conclusions" in instructions
     assert "no distinct evidence-bearing paper-internal direction" in instructions
     assert "supported finding or bounded limitation" in instructions
     assert "At least one plausible answer must materially" not in instructions
@@ -512,8 +522,8 @@ def test_reflection_enabled_master_moves_from_design_understanding_to_hypothesis
 
     first_prompt = json.loads(llm.calls[0]["prompt"])
     second_prompt = json.loads(llm.calls[1]["prompt"])
-    first_instructions = " ".join(first_prompt["instructions"])
-    second_instructions = " ".join(second_prompt["instructions"])
+    first_instructions = _instructions_text(first_prompt)
+    second_instructions = _instructions_text(second_prompt)
     assert first_prompt["research_phase"] == "understand_design"
     assert "attention priority" in first_instructions.lower()
     assert "all relevant paper sections remain available" in first_instructions.lower()
@@ -684,7 +694,7 @@ def test_locator_prompt_prioritizes_the_exact_page_for_a_named_source() -> None:
         )
     )
 
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "page where that label or heading itself appears" in instructions
     assert "nearby pages that merely discuss the same topic" in instructions
     assert "immediately adjacent page" in instructions
@@ -839,7 +849,7 @@ def test_evidence_prompt_requires_verbatim_text_quotes(tmp_path: Path) -> None:
     )(EvidenceTask("What does the ablation show?"))
 
     prompt = json.loads(llm.calls[1]["prompt"])
-    instructions = " ".join(prompt["instructions"]).lower()
+    instructions = _instructions_text(prompt).lower()
     assert "verbatim" in instructions
     assert "do not paraphrase" in instructions
 
@@ -1053,9 +1063,11 @@ def test_state_history_preserves_prior_marginal_value_contract() -> None:
     assert history["expected_judgment_delta"] == action.expected_judgment_delta
 
 
+@pytest.mark.parametrize("prompt_layout", ["standard", "cache-friendly"])
 def test_run_local_paper_agent_is_end_to_end_with_fake_llm_and_renderer(
     tmp_path: Path,
     monkeypatch: object,
+    prompt_layout: str,
 ) -> None:
     llm = FakeLLM(
         [
@@ -1123,6 +1135,7 @@ def test_run_local_paper_agent_is_end_to_end_with_fake_llm_and_renderer(
         pdf_path=pdf_path,
         llm=llm,
         max_rounds=2,
+        prompt_layout=prompt_layout,
     )
 
     payload = json.loads(trace.to_json())
@@ -1134,6 +1147,8 @@ def test_run_local_paper_agent_is_end_to_end_with_fake_llm_and_renderer(
     assert payload["steps"][0]["results"][0]["pages_read"] == [2]
     assert payload["source_document"] == "paper.pdf"
     assert len(llm.calls) == 5
+    assert all(record.prompt_layout == prompt_layout for record in trace.model_calls)
+    assert [record.user_prompt for record in trace.model_calls] == [call["prompt"] for call in llm.calls]
     assert llm.calls[-1]["image_urls"] is None
     assert rendered == [(1, 2), (2,)]
 
@@ -1736,7 +1751,7 @@ def test_master_receives_worker_suggestions_as_candidates_not_evidence() -> None
         "questions": ["Does a matched-budget control exist?"],
     }]
     assert len(action.tasks) == 2
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "candidate questions, not evidence" in instructions
 
 
@@ -1846,7 +1861,7 @@ def test_evidence_prompt_advertises_the_canonical_findings_list_shape() -> None:
         "one bounded follow-up question, if needed"
     ]
     assert prompt["mechanism_audit_principles"] == list(runtime.MECHANISM_AUDIT_PRINCIPLES)
-    assert "additional local issue" in " ".join(prompt["instructions"])
+    assert "additional local issue" in _instructions_text(prompt)
 
 
 def test_evidence_prompt_requests_all_distinct_grounded_local_issues_without_forcing_criticism() -> None:
@@ -1860,7 +1875,7 @@ def test_evidence_prompt_requests_all_distinct_grounded_local_issues_without_for
         )
     )
 
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "every distinct supported issue" in instructions
     assert "Do not stop after the first additional issue" in instructions
     assert "discrete boundary" in instructions
@@ -1896,7 +1911,7 @@ def test_evidence_prompt_requires_structured_visual_observation_and_context_veri
         )
     )
 
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "reported by another Worker" in instructions
     assert "independently verify" in instructions
     assert "row, column, metric, comparison, and configuration" in instructions
@@ -1919,7 +1934,7 @@ def test_single_pass_and_synthesis_share_the_decision_checklist() -> None:
     trace = AgentTrace(steps=(), outcome="NEEDS_HUMAN", assessment=None, stop_reason="stop")
     synthesis = json.loads(runtime._build_synthesis_prompt("paper.pdf", make_pages(), "[]", trace))
     assert single["decision_checklist"] == synthesis["decision_checklist"]
-    assert single["required_json_shape"]["checklist_coverage"]["claim_boundary"] == "covered|unresolved|not_applicable"
+    assert single["required_json_shape"]["checklist_coverage"]["stability_and_scope"] == "covered|unresolved|not_applicable"
     assert single["required_json_shape"] == synthesis["required_json_shape"]
     assert isinstance(single["required_json_shape"]["key_findings"][0]["evidence"], list)
     assert single["mechanism_audit_principles"] == list(runtime.MECHANISM_AUDIT_PRINCIPLES)
@@ -2004,7 +2019,7 @@ def test_synthesis_prompt_requests_a_comprehensive_judgment_without_silent_omiss
         )
     )
 
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "comprehensive paper judgment, not a short report or abstract" in instructions
     assert "Use as many key_findings as needed" in instructions
     assert "Do not silently omit" in instructions
@@ -2046,7 +2061,7 @@ def test_stability_audit_directions_are_explicit_and_shared() -> None:
         "auxiliary_model_reliability",
         "generative_transformation_fidelity",
         "matched_resource_efficiency",
-        "claim_result_consistency",
+        "main_evidence",
     }
     assert expected_keys <= set(runtime.DECISION_CHECKLIST)
     assert synthesis["decision_checklist"] == single["decision_checklist"]
@@ -2079,7 +2094,7 @@ def test_single_pass_uses_the_same_comprehensive_audit_standard_as_synthesis() -
         )
     )
 
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "comprehensive paper judgment, not a short report or abstract" in instructions
     assert "Use as many key_findings as needed" in instructions
     assert "negative result" in instructions
@@ -2127,7 +2142,7 @@ def _incremental_master_context_state() -> AgentState:
         suggested_questions=("OLD_SUGGESTED_QUESTION",),
         structured_findings=(WorkerFinding(
             "FIRST_FINDING_VERBATIM",
-            (FindingEvidence("EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND", "text", "paper.pdf, p. 2"),),
+            (FindingEvidence("EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM", "text", "paper.pdf, p. 2"),),
             "FIRST_CAVEAT_VERBATIM",
         ),),
     )
@@ -2148,7 +2163,7 @@ def _incremental_master_context_state() -> AgentState:
         suggested_questions=("LATEST_SUGGESTED_QUESTION",),
         structured_findings=(WorkerFinding(
             "LATEST_FINDING_VERBATIM",
-            (FindingEvidence("EVIDENCE_ITEM_CONTENT_LATEST_DO_NOT_SEND", "table", "Table 2, p. 5"),),
+            (FindingEvidence("EVIDENCE_ITEM_CONTENT_LATEST_VERBATIM", "table", "Table 2, p. 5"),),
             "LATEST_CAVEAT_VERBATIM",
         ),),
     )
@@ -2206,7 +2221,7 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
         page_index="[{\"page_number\": 2}]",
         overview_text="OVERVIEW_TEXT_MUST_NOT_REPEAT",
         overview_images=("data:image/png;base64,overview",),
-        master_context_mode="incremental-no-raw-evidence",
+        master_context_mode="incremental-with-evidence",
     )
 
     legacy(state)
@@ -2226,6 +2241,7 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
             "round_number": 1,
             "task_number": 1,
             "question": "Exact first task question",
+            "independent_read": False,
             "pages_read": [2, 3],
             "status": "completed",
             "finding_ids": ["r1-t1-f1"],
@@ -2234,6 +2250,7 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
             "round_number": 1,
             "task_number": 2,
             "question": "Exact failed task question",
+            "independent_read": False,
             "pages_read": [4],
             "status": "failed",
             "finding_ids": [],
@@ -2242,6 +2259,7 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
             "round_number": 2,
             "task_number": 1,
             "question": "Exact latest task question",
+            "independent_read": False,
             "pages_read": [5],
             "status": "completed",
             "finding_ids": ["r2-t1-f1"],
@@ -2253,8 +2271,8 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
     assert "LATEST_CAVEAT_VERBATIM" in serialized
     assert "RAW_EVIDENCE_FIRST_DO_NOT_SEND_TO_MASTER" not in serialized
     assert "RAW_EVIDENCE_LATEST_DO_NOT_SEND_TO_MASTER" not in serialized
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" not in serialized
-    assert "EVIDENCE_ITEM_CONTENT_LATEST_DO_NOT_SEND" not in serialized
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in serialized
+    assert "EVIDENCE_ITEM_CONTENT_LATEST_VERBATIM" in serialized
     assert prompt["state"]["latest_reflection_report"]["reflection_memo"] == "LATEST_REFLECTION_MEMO_VERBATIM"
     assert "OLD_REFLECTION_MEMO_DO_NOT_SEND" not in serialized
     assert prompt["state"]["provisional_assessment"] == "CURRENT_ASSESSMENT_VERBATIM"
@@ -2272,9 +2290,50 @@ def test_incremental_master_context_keeps_only_the_later_round_projection() -> N
     assert "LATEST_SUGGESTED_QUESTION" in serialized
     assert "OLD_SUGGESTED_QUESTION" not in serialized
     full_state = runtime._state_payload(state)
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in json.dumps(full_state)
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in json.dumps(full_state)
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in json.dumps(full_state)
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in json.dumps(full_state)
     assert "OLD_REFLECTION_MEMO_DO_NOT_SEND" in json.dumps(full_state)
+
+
+@pytest.mark.parametrize("prompt_layout", ["standard", "cache-friendly"])
+@pytest.mark.parametrize("master_mode,paper_mode", [
+    ("incremental-with-evidence", "master-overview-history-only"),
+    ("full-history", "master-main-text-history-only"),
+])
+def test_incremental_master_receives_every_evidence_item_with_its_source(prompt_layout, master_mode, paper_mode):
+    task = EvidenceTask("Compare evaluation stages", rubric_ids=("evaluation_validity",))
+    result = WorkerResult(task=task, pages_read=(2, 3), structured_findings=(WorkerFinding(
+        "Candidate selection and final evaluation use different settings.",
+        (FindingEvidence("Candidates use K=1.", "text", "p. 2"),
+         FindingEvidence("Final evaluation uses K=3.", "table", "Table 2, p. 3"),
+         FindingEvidence("Intervals describe final evaluation.", "figure", "Figure 1, p. 3")),
+        "Do not equate selection and final evaluation.",
+    ),))
+    legacy = WorkerResult(task=EvidenceTask("Legacy report"), finding="Legacy finding",
+        evidence="Legacy quote", evidence_type="text", evidence_locator="p. 4")
+    results = (result, legacy)
+    state = AgentState(findings=results, steps=(TraceStep(
+        1, MasterAction("READ_PAPER", tuple(r.task for r in results)), results),))
+    llm = FakeLLM([{"kind": "NEEDS_HUMAN"}])
+    recorder = runtime.ModelCallRecorder(prompt_layout=prompt_layout)
+    runtime.PaperAgentMaster(llm=llm, paper_name="paper", page_index="[]",
+        overview_text="OVERVIEW_NOT_REPEATED", overview_images=(), recorder=recorder,
+        master_context_mode=master_mode, paper_context_mode=paper_mode)(state)
+    prompt = json.loads(llm.calls[0]["prompt"])
+    findings = prompt["state"]["findings"]
+    assert [f["finding_id"] for f in findings] == ["r1-t1-f1", "r1-t2-f1"]
+    assert findings[0]["evidence_items"] == [
+        {"content": e.content, "evidence_type": e.evidence_type, "locator": e.locator}
+        for e in result.structured_findings[0].evidence
+    ]
+    assert findings[0]["caveat"] == result.structured_findings[0].caveat
+    assert findings[0]["task_rubric_ids"] == ["evaluation_validity"]
+    assert findings[1]["evidence_items"] == [
+        {"content": "Legacy quote", "evidence_type": "text", "locator": "p. 4"}]
+    assert "evidence" not in findings[0]  # Do not duplicate the primary quote.
+    assert llm.calls[0]["prompt"].count("Candidates use K=1.") == 1
+    assert "overview_pages" not in prompt and llm.calls[0]["image_urls"] is None
+    assert recorder.records[0].user_prompt == llm.calls[0]["prompt"]
 
 
 @pytest.mark.parametrize("suggestions", [
@@ -2307,7 +2366,7 @@ def test_incremental_master_receives_all_latest_round_worker_suggestions(
         page_index="[]",
         overview_text="Overview.",
         overview_images=(),
-        master_context_mode="incremental-no-raw-evidence",
+        master_context_mode="incremental-with-evidence",
     )
 
     master(state)
@@ -2331,7 +2390,7 @@ def test_incremental_master_context_preserves_the_first_call_and_full_reflector_
         page_index="[]",
         overview_text="FIRST_CALL_OVERVIEW",
         overview_images=("data:image/png;base64,overview",),
-        master_context_mode="incremental-no-raw-evidence",
+        master_context_mode="incremental-with-evidence",
     )
 
     master(AgentState(remaining_rounds=5))
@@ -2349,7 +2408,7 @@ def test_incremental_master_context_preserves_the_first_call_and_full_reflector_
     )
     reflector(state, trigger="post_method_model", finding_ids=("r2-t1-f1",))
     reflector_prompt = json.loads(reflector_llm.calls[0]["prompt"])
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in json.dumps(reflector_prompt["state"])
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in json.dumps(reflector_prompt["state"])
     assert "OLD_REFLECTION_MEMO_DO_NOT_SEND" in json.dumps(reflector_prompt["state"])
     trace = AgentTrace(
         steps=state.steps,
@@ -2359,7 +2418,7 @@ def test_incremental_master_context_preserves_the_first_call_and_full_reflector_
         reflection_reports=state.reflection_reports,
     )
     synthesis_prompt = json.loads(runtime._build_synthesis_prompt("paper.pdf", make_pages(), "[]", trace))
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in json.dumps(synthesis_prompt["history"])
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in json.dumps(synthesis_prompt["history"])
     assert "OLD_REFLECTION_MEMO_DO_NOT_SEND" in json.dumps(synthesis_prompt["history"])
 
 
@@ -2432,8 +2491,8 @@ def test_context_ownership_later_master_keeps_incremental_state_without_paper_pa
 
     prompt = json.loads(llm.calls[0]["prompt"])
     assert prompt["state"]["latest_reflection_report"]["reflection_memo"] == "LATEST_REFLECTION_MEMO_VERBATIM"
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" not in json.dumps(prompt)
-    assert "EVIDENCE_ITEM_CONTENT_LATEST_DO_NOT_SEND" not in json.dumps(prompt)
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in json.dumps(prompt)
+    assert "EVIDENCE_ITEM_CONTENT_LATEST_VERBATIM" in json.dumps(prompt)
     for key in ("main_paper_text", "overview_pages", "image_inputs"):
         assert key not in prompt
     assert prompt["compact_page_index"]
@@ -2461,10 +2520,10 @@ def test_context_ownership_synthesis_keeps_history_without_paper_or_index() -> N
     )
 
     serialized_history = json.dumps(prompt["history"])
-    assert "EVIDENCE_ITEM_CONTENT_FIRST_DO_NOT_SEND" in serialized_history
+    assert "EVIDENCE_ITEM_CONTENT_FIRST_VERBATIM" in serialized_history
     assert "full_paper_pages" not in prompt
     assert "compact_page_index" not in prompt
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "Do not perform an independent paper-reading pass" in instructions
     assert "independent full-paper gap check" not in instructions
     assert "Use the full paper to check Worker claims" not in instructions
@@ -2526,7 +2585,7 @@ def test_master_prompt_separates_coverage_from_sufficiency_and_preserves_open_qu
     master(AgentState(remaining_rounds=5))
 
     prompt = json.loads(master.llm.calls[0]["prompt"])
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     principles = " ".join(prompt["mechanism_audit_principles"])
     assert "Count an issue as covered when it is mentioned" not in principles
     assert "Checklist coverage records what has been examined; it is not by itself evidence that the paper judgment is complete" in instructions
@@ -2560,7 +2619,7 @@ def test_locator_prompt_is_navigation_only_and_treats_index_as_incomplete() -> N
         )
     )
 
-    instructions = " ".join(prompt["instructions"])
+    instructions = _instructions_text(prompt)
     assert "incomplete navigation aid" in instructions
     assert "absence from the preview is not evidence of absence" in instructions
     assert "smallest sufficient page set" in instructions
@@ -2652,8 +2711,9 @@ def test_failed_final_synthesis_does_not_leave_a_nonuniform_loop_assessment(
 
 
 @pytest.mark.parametrize("mode", ["full-history", "rubric-union"])
+@pytest.mark.parametrize("prompt_layout", ["standard", "cache-friendly"])
 def test_adaptive_run_records_focused_reflection_and_final_finding_provenance(
-    tmp_path, monkeypatch, mode: str,
+    tmp_path, monkeypatch, mode: str, prompt_layout: str,
 ) -> None:
     pages = make_pages()
     monkeypatch.setattr(runtime, "extract_pdf_pages", lambda path: pages)
@@ -2675,11 +2735,24 @@ def test_adaptive_run_records_focused_reflection_and_final_finding_provenance(
     final = {
         "assessment": "The model roles are a confound.",
         "key_findings": [{**evidence["findings"][0], "source_finding_ids": ["r1-t1-f1", "r2-t1-f1"]}],
+        "method_understanding": {
+            "sections": [{
+                "section_id": key,
+                "explanation": "The supplied observation partially describes the method; remaining steps are not established.",
+                "basis": "unresolved", "source_finding_ids": ["r1-t1-f2"],
+                "caveat": "Only selected-page evidence is available.",
+            } for key in runtime.METHOD_SECTION_GUIDANCE],
+            "unresolved_questions": ["What links the observed components?"],
+        },
         "finding_dispositions": [
             {"finding_id": key, "status": "merged", "reason": "Joint model-role comparison"}
             for key in ("r1-t1-f1", "r2-t1-f1")
-        ],
+        ] + [{"finding_id": key, "status": "retained", "reason": "Described in method explanation"}
+             for key in ("r1-t1-f2", "r2-t1-f2")],
     }
+    evidence["findings"].append({**evidence["findings"][0], "finding": "A descriptive method observation."})
+    for section in final["method_understanding"]["sections"]:
+        section["source_finding_ids"].append("r2-t1-f2")
     llm = FakeLLM([
         read, {"page_ranges": [{"start": 1, "end": 1}], "rationale": "Method"}, evidence,
         {"reflection_memo": "Consider a model-role confound."},
@@ -2689,8 +2762,9 @@ def test_adaptive_run_records_focused_reflection_and_final_finding_provenance(
     ])
     trace = runtime.run_local_paper_agent(
         pdf_path=tmp_path / "paper.pdf", llm=llm, max_rounds=4, max_reflections=2,
-        master_context_mode="incremental-no-raw-evidence",
+        master_context_mode="incremental-with-evidence",
         paper_context_mode="master-overview-history-only", reflection_context_mode=mode,
+        prompt_layout=prompt_layout,
     )
     assert trace.outcome == "DECIDE"
     assert len(trace.reflection_reports) == 2
@@ -2701,7 +2775,16 @@ def test_adaptive_run_records_focused_reflection_and_final_finding_provenance(
     assert trace.steps[2].action.reflection_finding_ids == ("r1-t1-f1", "r2-t1-f1")
     assert trace.final_judgment.provenance_status == "complete"
     assert trace.final_judgment.key_findings[0].source_finding_ids == ("r1-t1-f1", "r2-t1-f1")
+    assert trace.final_judgment.method_understanding_warnings == ()
+    assert len(trace.final_judgment.method_understanding.sections) == 6
+    assert trace.final_judgment.finding_dispositions[2].final_finding_indexes == ()
+    assert trace.final_judgment.finding_dispositions[2].method_section_ids == tuple(runtime.METHOD_SECTION_GUIDANCE)
+    synthesis_input = json.loads(trace.model_calls[-1].user_prompt)
+    assert "method_understanding" in synthesis_input["required_json_shape"]
+    assert "full_paper_pages" not in synthesis_input
     assert len(trace.model_calls) == 11
+    assert all(record.prompt_layout == prompt_layout for record in trace.model_calls)
+    assert [record.user_prompt for record in trace.model_calls] == [call["prompt"] for call in llm.calls]
     assert not llm.responses
 
 
@@ -2790,12 +2873,13 @@ def test_selected_context_reaches_locator_and_evidence_without_full_master_state
         "evidence_locator": "Table 1, p. 1",
         "decision_relevance": "Check whether the results conflict.",
         "task_rubric_ids": [],
+            "prior_finding_ids": [],
     }
     assert locator_prompt["research_context"] == [expected_context]
     assert evidence_prompt["research_context"] == [expected_context]
     assert "history" not in locator_prompt
     assert "checklist_coverage" not in evidence_prompt
-    context_instructions = " ".join(evidence_prompt["instructions"])
+    context_instructions = _instructions_text(evidence_prompt)
     assert "reported by another Worker" in context_instructions
     assert "independently verify" in context_instructions
     assert result.error is None
@@ -2873,7 +2957,7 @@ def test_worker_receives_task_decision_context_without_selected_findings(tmp_pat
     for prompt in (locator_prompt, evidence_prompt):
         assert prompt["question"] == task.question
         assert prompt["decision_context"] == task.decision_relevance
-        instructions = " ".join(prompt["instructions"]).lower()
+        instructions = _instructions_text(prompt).lower()
         assert "unverified" in instructions
         assert "not paper evidence" in instructions
     assert "research_context" not in locator_prompt
@@ -2920,7 +3004,7 @@ def test_master_prompt_explains_context_selection_as_a_bounded_research_lead() -
     assert "decision_relevance" in task_contract
     assert "unverified" in task_contract["decision_relevance"]
     assert "purpose" in task_contract["decision_relevance"]
-    assert "related_finding_ids" in " ".join(prompt["instructions"])
+    assert "related_finding_ids" in _instructions_text(prompt)
 
 
 def test_evidence_findings_list_preserves_individual_finding_evidence_pairs_for_context() -> None:
@@ -3016,6 +3100,7 @@ def test_state_payload_keeps_structured_evidence_and_worker_diagnostics() -> Non
             "finding_id": "r1-t1-f1",
             "question": "Inspect the comparison",
             "task_rubric_ids": [],
+            "prior_finding_ids": [],
             "finding": "first finding",
             "evidence": "first text",
             "evidence_type": "text",
@@ -3032,6 +3117,7 @@ def test_state_payload_keeps_structured_evidence_and_worker_diagnostics() -> Non
             "finding_id": "r1-t1-f2",
             "question": "Inspect the comparison",
             "task_rubric_ids": [],
+            "prior_finding_ids": [],
             "finding": "second finding",
             "evidence": "second figure",
             "evidence_type": "figure",
@@ -3110,13 +3196,11 @@ def test_role_mixed_worker_uses_discovery_or_cross_check_prompt_from_task_contex
     assert "independent local evidence analyst" not in " ".join(
         prompts[0].get("instructions", [])
     )
-    assert "independent local evidence analyst" in " ".join(prompts[1]["instructions"])
+    assert "independent local evidence analyst" in _instructions_text(prompts[1])
     assert prompts[2]["research_context"][0]["finding_id"] == "r1-t1-f1"
-    assert "cross-finding reviewer" not in " ".join(prompts[2]["instructions"])
-    assert "source-grounded cross-check analyst" in " ".join(prompts[3]["instructions"])
-    assert "do not delete, overwrite, or rewrite historical findings" in " ".join(
-        prompts[3]["instructions"]
-    )
+    assert "cross-finding reviewer" not in _instructions_text(prompts[2])
+    assert "source-grounded context-assisted reader" in _instructions_text(prompts[3])
+    assert "do not delete, overwrite, or rewrite historical findings" in _instructions_text(prompts[3])
 
 
 def test_role_mixed_master_prompt_allows_discovery_and_cross_check_tasks_without_forcing_either() -> None:
@@ -3131,7 +3215,11 @@ def test_role_mixed_master_prompt_allows_discovery_and_cross_check_tasks_without
 
     master(AgentState(remaining_rounds=5))
 
-    instructions = " ".join(json.loads(master.llm.calls[0]["prompt"])["instructions"])
+    instructions = _instructions_text(json.loads(master.llm.calls[0]["prompt"]))
     assert "First round normally uses Discovery" in instructions
     assert "mix Discovery and Cross-check" in instructions
     assert "do not force one task of each kind" in instructions
+
+
+def _instructions_text(payload):
+    return " ".join(payload.get("instructions", []) + payload.get("phase_instructions", []) + payload.get("context_instructions", []))

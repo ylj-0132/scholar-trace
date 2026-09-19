@@ -1,5 +1,10 @@
 # From Full-Paper Judging to an Adaptive Paper Audit
 
+This is the historical design narrative through September 7, 2026. Statements
+about pending experiments and prompt behavior describe their respective stages.
+For the current paper-reading workflow and later observations, see the
+[reading contract](PAPER_READING.md) and [architecture](ARCHITECTURE.md).
+
 ScholarTrace did not begin with five roles or a carefully separated context
 model. The first version was a much simpler question: can a strong model read a
 paper once and produce a useful, evidence-grounded judgment?

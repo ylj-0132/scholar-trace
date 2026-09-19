@@ -1,21 +1,45 @@
 # ScholarTrace
 
-ScholarTrace audits a local research paper as evidence for an implementable
-mechanism. It is a paper-reading research prototype: it does not search the
+ScholarTrace reads a local research paper to explain its whole method and assess
+its contribution, evidence and limitations. It is a paper-reading research prototype: it does not search the
 web during its internal audit, rank papers for personal use, or replace peer
 review.
+
+## Suggested reading
+
+Start with this README for the project and execution flow, then read
+[Architecture](docs/ARCHITECTURE.md) for role responsibilities and context boundaries.
+The [paper-reading contract](docs/PAPER_READING.md) explains method reports,
+Rubric content management and the latest documented ReMe observation.
+
+For design evidence, the [case study](docs/CASE_STUDY.md) explains the earlier
+iterations and tradeoffs; the [HarnessBank comparison](docs/HARNESSBANK_VERSION_COMPARISON.md)
+summarizes the fixed-state Reflection experiment and its limits. The
+[cache comparison](docs/PROMPT_CACHE_COMPARISON.md) separates observed prefix
+reuse from unverified speed and billing benefits. Dated historical sections
+describe the implementation at that time, not the current configuration.
 
 ## What it does
 
 The supported audit uses five bounded roles:
 
-- **Master** decides which paper-internal questions still matter.
+- **Master** decides which paper-internal questions improve method understanding or evidence assessment.
 - **Locator** selects the smallest relevant page range.
-- **Evidence** records findings and caveats from those pages.
-- **Reflection** identifies a consequential unresolved mechanism question.
-  It also checks material cross-Worker contradictions and evidence-scope
-  mismatches within the requested review scope; it does not replace evidence work.
-- **Synthesis** produces one evidence-grounded final judgment.
+- **Evidence** records method details, findings and caveats from those pages.
+- **Reflection** reports all distinct issues grounded in its supplied evidence
+  that could affect method understanding or the paper's evaluation, including mechanism explanations,
+  cross-Worker qualifications and evidence-scope mismatches. It orders issues
+  by impact without limiting the memo to one issue or replacing evidence work.
+- **Synthesis** produces a sourced method explanation alongside an evidence-grounded final judgment.
+
+New supported runs explain the problem, core idea, representations and modules,
+complete workflow, essential details and operating conditions, plus a worked
+example when evidence allows. The twelve rubric directions guide reading and
+evaluation; coverage is not a grade. The method explanation cites Worker findings
+and distinguishes reported facts, inference, constructed illustrations and gaps.
+See the [reading report contract](docs/PAPER_READING.md). Historical experiments
+retain their original outputs; they are not retrofitted with method explanations.
+The local interview showcase is not distributed in this repository.
 
 The default configuration uses Terra for Master and Reflection, and Luna for
 Locator, Evidence, and Synthesis. See [Architecture](docs/ARCHITECTURE.md) for
@@ -36,7 +60,8 @@ local PDF
 
 The controller is deterministic even though the role outputs are model
 generated. Context ownership is asymmetric: the first Master call gets a
-two-page overview, later Master calls get incremental structured state,
+two-page overview, later Master calls get incremental structured state including
+each finding's complete Worker evidence items and source locators,
 Evidence sees only selected pages, and Synthesis writes from the audit history
 without rereading the full paper. Web evidence is isolated in a separate,
 post-hoc workflow so it cannot silently change the paper-only trace.
@@ -47,6 +72,14 @@ post-hoc workflow so it cannot silently change the paper-only trace.
   index. Master uses it to select related evidence, Workers receive task-specific
   guidance, and Reflection/Synthesis compare reports without copying evidence into
   each rubric bucket. These are routing hints, not scores or proof of coverage.
+- A separate traceable Rubric content layer organizes actual Worker findings,
+  sourced Reflection notes and Master interpretations. Corrections preserve old
+  entries and their reasons. Unassigned findings remain visible; final reports
+  stay coherent rather than becoming twelve per-dimension reports.
+- Master can select up to three relevant prior findings for complementary source
+  reading. Workers retain the evidence actually used as traceable dependencies;
+  independent rereading omits this background. Persistent key details help
+  Synthesis account for acquired parameters, conditions and update rules.
 - The adaptive trace records every question, selected page range, finding,
   caveat, stopping decision, model call, and token count for inspection.
 - Role/model routing spends the stronger model on planning and Reflection while
@@ -82,8 +115,11 @@ scholar-trace audit paper/example.pdf --output data/audits/example
 `--output` is create-once: the command refuses an existing directory.
 `--worker-parallelism {1,2,3,4}` defaults to `2`. The optional second Reflection
 uses `--reflection-context rubric-union` by default; `full-history` retains
-the broader input for comparison. The first Reflection keeps its original
-trigger, input scope and mechanism reasoning, with additive consistency guidance.
+the broader input for comparison. The first Reflection receives the complete
+accumulated structured history, including Worker evidence. Every Reflection
+reports all evaluation-relevant issues it identifies in its actual input.
+Master's requested focus is a starting point, not an exclusive topic restriction;
+the later union input still limits which evidence the Reflector can inspect.
 Master can request a valuable check of existing evidence without new findings or
 a previously identified contradiction. The runtime assembles matching rubric
 findings plus optional cross-rubric anchors; it does not force a second review.
@@ -110,11 +146,47 @@ behavior; the older anchor-only focused/routing implementations are removed.
 Historical manifests and sent prompts keep their original names and hashes.
 See [formalization and cleanup](docs/V20_FORMALIZATION.md).
 
+The current reading revision uses `master-v30-complementary-evidence`,
+`locator-v9-reading-rubric`, `evidence-v18-traceable-context`,
+`reflection-v15-unconfirmed-scope` and `synthesis-v17-advisory-details` in new
+manifests, with `rubric_version=paper-reading-12-v1` and
+`rubric_content_version=rubric-content-v3-advisory`.
+The v20 controller and Reflection input policies remain in use.
+Master now receives Worker evidence as well as summaries and caveats. Low-level
+callers should migrate `master_context_mode="incremental-no-raw-evidence"` to
+`"incremental-with-evidence"`; the old name is rejected. The public audit selects
+the updated mode automatically. Earlier experiments predate these revisions;
+the [September 19 ReMe observation](docs/PAPER_READING.md#september-19-reme-observation)
+documents one current run, not a controlled quality or cost improvement. Locator gets bounded
+question-specific snippets and page-internal headings/captions as navigation
+hints. Worker instructions prioritize author-reported qualifications alongside
+the answer and preserve the inspected scope of missing-detail claims. Master
+separately sees IDs added since the last successful Reflection and IDs never
+supplied to a successful Reflection, then compares new evidence with memo leads.
+These attention aids do not force a second Reflection or certify verification.
+
 The [HarnessBank comparison](docs/HARNESSBANK_VERSION_COMPARISON.md) includes a
 separate four-input Reflection experiment: v20 used 46.48% fewer total tokens
 than full history in that one fixed case while preserving the main judgment.
 Full history also performed well. This is evidence of context efficiency in
 one example, not a stable improvement in capability or end-to-end performance.
+
+For a prompt-cache experiment, keep the default `--prompt-layout standard` or
+select `--prompt-layout cache-friendly`. The latter now sends explicit cache
+parameters and marks the ends of the role system prompt and reusable JSON prefix
+with cache breakpoints. The current `explicit-breakpoints-v3` layout keeps phase
+and task-context instructions outside the reusable prefix; dynamic state and
+images also follow those boundaries. Historical v2 experiments retain their
+original prompts and measurements.
+`standard` sends no cache controls; it is not a cache-off switch. Both make fresh
+model requests. Gateway support and actual hits still require measurement. This is independent of
+Reflection context and does not change the v20 controller. New results record
+cache read/write counters when returned and audit wall time. An offline tool
+compares saved runs with optional explicit prices; see
+[prompt layout comparison](docs/PROMPT_CACHE_COMPARISON.md) for commands,
+missing-data handling and quality checks. AiHubMix probes and one H-Mem run
+reported prefix reuse; a reliable speed benefit and actual billed savings remain
+unverified.
 
 An audit writes:
 
@@ -153,6 +225,10 @@ paper-only source result is never modified.
 - `paper_agent_runtime.py` contains role prompts, context construction, and LLM
   adapters.
 - `experiment.py` is the supported local-PDF runner.
+- `paper_understanding.py`, `rubric_content.py` and `rubric_details.py` manage
+  method-review contracts, traceable interpretations and persistent detail accounting.
+- `audit_comparison.py` compares saved runs offline, including cache usage and
+  optional cost estimates.
 - `external_audit.py` is the optional post-hoc Planner → Grok → Auditor path.
 - `tests/` uses fake clients and transports; it does not spend model or search
   credits.

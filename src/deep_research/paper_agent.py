@@ -7,6 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from typing import Callable, Literal, Protocol
 
+from deep_research.paper_understanding import MethodUnderstanding, MethodReview
+from deep_research.rubric_content import RubricEntry, RubricLink
+from deep_research.rubric_details import KeyDetail, DetailUpdate
+
 ActionKind = Literal["READ_PAPER", "REFLECT", "READ_PAPER_AND_REFLECT", "DECIDE", "NEEDS_HUMAN"]
 @dataclass(frozen=True)
 class EvidenceTask:
@@ -15,6 +19,7 @@ class EvidenceTask:
     related_finding_ids: tuple[str, ...] = ()
     decision_relevance: str = ""
     rubric_ids: tuple[str, ...] = ()
+    independent_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,10 @@ class WorkerFinding:
     finding: str
     evidence: tuple[FindingEvidence, ...]
     caveat: str
+    content_rubric_ids: tuple[str, ...] = ()
+    content_warnings: tuple[str, ...] = ()
+    key_details: tuple[KeyDetail, ...] = ()
+    prior_finding_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,7 @@ class ResearchContext:
     decision_relevance: str
     evidence_items: tuple[FindingEvidence, ...] = ()
     task_rubric_ids: tuple[str, ...] = ()
+    prior_finding_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,11 @@ class MasterAction:
     reflection_rubric_ids: tuple[str, ...] = ()
     reflection_finding_ids: tuple[str, ...] = ()
     independence_rationale: str = ""
+    rubric_updates: tuple[RubricEntry, ...] = ()
+    rubric_links: tuple[RubricLink, ...] = ()
+    content_warnings: tuple[str, ...] = ()
+    method_review: MethodReview | None = None
+    detail_updates: tuple[DetailUpdate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,9 @@ class ReflectionReport:
     context_finding_ids: tuple[str, ...] = ()
     context_rubric_ids: tuple[str, ...] = ()
     context_diagnostics: tuple[str, ...] = ()
+    rubric_notes: tuple[RubricEntry, ...] = ()
+    content_warnings: tuple[str, ...] = ()
+    available_after_round: int | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +167,11 @@ class ModelCallRecord:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
+    cache_write_prompt_tokens: int | None = None
+    prompt_layout: str = "standard"
+    prompt_layout_version: str = "field-order-v1"
+    prompt_cache_prefix_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +204,7 @@ class FindingDisposition:
     status: str
     reason: str
     final_finding_indexes: tuple[int, ...] = ()
+    method_section_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -192,6 +216,12 @@ class FinalJudgment:
     finding_dispositions: tuple[FindingDisposition, ...] = ()
     provenance_status: str = "not_checked"
     provenance_warnings: tuple[str, ...] = ()
+    method_understanding: MethodUnderstanding | None = None
+    method_understanding_warnings: tuple[str, ...] = ()
+    detail_dispositions: tuple[dict[str, object], ...] = ()
+    detail_retention_status: str = "not_checked"
+    detail_retention_warnings: tuple[str, ...] = ()
+    human_review_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -220,6 +250,7 @@ class AgentTrace:
     reflection_reports: tuple[ReflectionReport, ...] = ()
     deferred_decisions: tuple[DeferredDecision, ...] = ()
     stop_reason_code: str | None = None
+    rubric_content: dict[str, object] | None = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)
@@ -488,7 +519,7 @@ def _run_reflection(
         "trigger": trigger,
         "finding_count": len(finding_ids),
     })
-    return report
+    return replace(report, available_after_round=round_number)
 
 
 def _run_worker(
@@ -651,6 +682,8 @@ def _set_worker_research_context(
 def _selected_research_context(
     state: AgentState, task: EvidenceTask
 ) -> tuple[tuple[ResearchContext, ...], tuple[str, ...]]:
+    if task.independent_read:
+        return (), ()
     if not task.related_finding_ids:
         return (), ()
     prior = {
@@ -701,6 +734,7 @@ def completed_finding_records(state: AgentState) -> tuple[ResearchContext, ...]:
                         decision_relevance="",
                         evidence_items=finding.evidence,
                         task_rubric_ids=result.task.rubric_ids,
+                        prior_finding_ids=finding.prior_finding_ids,
                     )
                 )
     return tuple(records)
